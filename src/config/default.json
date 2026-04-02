@@ -1,0 +1,66 @@
+{
+    "algo": {
+        "batch_size": 1000,
+        "buffer_size": 1000000,
+        "gamma": 0.995,
+        "n_step": 20,
+        "polyak": 0.01,
+        "policy_freq": 1,
+        "fixed_order": false,
+        "entropy_coef": 1e-4,
+        "grad_clip": 20.0,
+        "lr": 3e-4,
+        "enc_lr_scale": 0.3,
+        "update_per_train": 2,
+        "train_interval": 1
+    },
+    "world_model": {
+        "latent_dim": 128,
+        "hidden_dims": [512, 512],
+        "num_bins": 101,
+        "reward_min": -10,
+        "reward_max": 10,
+        "simnorm_dim": 8,
+        "step_rho": 0.5,
+        "dynamics_coef": 20.0,
+        "reward_coef": 0.1,
+        "q_coef": 0.1,
+        "horizon": 5
+    },
+    "plan": {
+        "horizon": 3,
+        "iterations": 6,
+        "num_samples": 128,
+        "num_pi_trajs": 8,
+        "num_elites": 16,
+        "max_std": 1.0,
+        "min_std": 0.05,
+        "temperature": 0.5
+    },
+    "train": {
+        "n_rollout_threads": 4,
+        "num_env_steps": 1000000,
+        "warmup_steps": 5000,
+        "warmup_train": true,
+        "warmup_train_steps": 2500,
+        "log_interval": 10,
+        "eval_interval": 10000,
+        "save_interval": 50000,
+        "use_linear_lr_decay": false
+    },
+    "actor": {
+        "hidden_sizes": [128, 128],
+        "log_std_min": -10,
+        "log_std_max": 2,
+        "lr": 3e-4
+    },
+    "critic": {
+        "hidden_sizes": [512, 512],
+        "scale_tau": 0.01
+    },
+    "env": {
+        "scenario": "HalfCheetah",
+        "agent_conf": "2x3",
+        "episode_limit": 1000
+    }
+}
