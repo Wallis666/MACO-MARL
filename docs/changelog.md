@@ -15,6 +15,11 @@
 
 <!-- 新记录插入到此行下方，最新的在最上面 -->
 
+### 20260402-190000
+- **类型**: refactor
+- **涉及文件**: `src/runner/trainer.py`, `src/envs/mamujoco.py`, `src/config/default.json`, `train.py`
+- **摘要**: 切换为路线 2（Dreamer 风格）：训练时用 Actor 采样替代 MPPI 规划，大幅降低每步推理开销（2304 次→1 次）。添加 `_act` 方法、`SubprocVectorMAMuJoCoEnv` 多进程环境、tqdm 进度条。MPPI 保留供评估使用。配置更新：batch_size=4096, n_rollout_threads=16, update_per_train=4, log_interval=250。
+
 ### 20260402-150000
 - **类型**: feat
 - **涉及文件**: `src/` 全部新建文件, `train.py`, `tests/test_shapes.py`, `src/config/default.json`

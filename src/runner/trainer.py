@@ -247,7 +247,7 @@ class Trainer:
         for step in pbar:
             self.global_step = step * self.n_threads
 
-            actions = self._plan(obs_list, t0)
+            actions = self._act(obs_list)
 
             actions_np = self._actions_to_numpy(actions)
 
@@ -420,6 +420,30 @@ class Trainer:
             actors=self.actors,
             critic=self.critic,
         )
+
+    @torch.no_grad()
+    def _act(
+        self,
+        obs_list: list,
+    ) -> list[torch.Tensor]:
+        """用 Actor 策略直接生成动作（训练时使用）。
+
+        :param obs_list: 当前观测
+        :return: 各智能体动作列表，每项 (n_threads, act_dim)
+        """
+        actions = []
+        for i in range(self.n_agents):
+            obs_i = np.stack(
+                [obs_list[env_idx][i] for env_idx in range(self.n_threads)],
+                axis=0,
+            )
+            obs_t = torch.as_tensor(
+                obs_i, dtype=torch.float32, device=self.device,
+            )
+            z_i = self.encoders[i].encode(obs_t)
+            a_i = self.actors[i].get_actions(z_i, stochastic=True)
+            actions.append(a_i)
+        return actions
 
     def _insert_buffer(
         self,
