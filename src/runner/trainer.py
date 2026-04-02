@@ -19,7 +19,12 @@ from src.algorithms.actor import WorldModelActor
 from src.algorithms.critic import WorldModelCritic
 from src.algorithms.planner import MPPIPlanner
 from src.buffer.replay_buffer import ReplayBuffer
-from src.envs.mamujoco import SubprocVectorMAMuJoCoEnv, VectorMAMuJoCoEnv
+from src.envs.mamujoco import (
+    MultiTaskVectorMAMuJoCoEnv,
+    MultiTaskVectorMAMuJoCoEnvDebug,
+    SubprocVectorMAMuJoCoEnv,
+    VectorMAMuJoCoEnv,
+)
 from src.models.dynamics import DenseDynamics
 from src.models.encoder import MLPEncoder
 from src.models.reward import DenseReward
@@ -27,7 +32,7 @@ from src.models.utils import TwoHotProcessor
 
 
 class Trainer:
-    """阶段 0 单任务训练器。
+    """训练器，支持单任务和多任务模式。
 
     :param config_path: 配置文件路径
     :param device: 设备
@@ -60,24 +65,49 @@ class Trainer:
         self.global_step = 0
 
     def _init_env(self) -> None:
-        """初始化向量化环境。"""
+        """初始化向量化环境（支持单任务和多任务）。"""
         env_cfg = self.config["env"]
         train_cfg = self.config["train"]
         self.n_threads = train_cfg["n_rollout_threads"]
 
-        EnvClass = (
-            SubprocVectorMAMuJoCoEnv if self.use_subproc
-            else VectorMAMuJoCoEnv
-        )
-        self.envs = EnvClass(
-            n_envs=self.n_threads,
-            scenario=env_cfg["scenario"],
-            agent_conf=env_cfg["agent_conf"],
-            episode_limit=env_cfg["episode_limit"],
-            orientation_penalty=env_cfg.get("orientation_penalty", 0.0),
-            action_rate_penalty=env_cfg.get("action_rate_penalty", 0.0),
-            healthy_height=env_cfg.get("healthy_height", 0.0),
-        )
+        self.multitask = env_cfg.get("mode") == "multitask"
+
+        if self.multitask:
+            from src.config.tasks import get_tasks
+
+            tasks = get_tasks(env_cfg["tasks"])
+            self.n_tasks = len(tasks)
+            self.task_names = [t.name for t in tasks]
+
+            EnvClass = (
+                MultiTaskVectorMAMuJoCoEnv if self.use_subproc
+                else MultiTaskVectorMAMuJoCoEnvDebug
+            )
+            self.envs = EnvClass(
+                n_envs=self.n_threads,
+                tasks=tasks,
+                episode_limit=env_cfg["episode_limit"],
+            )
+            self.task_idxes = self.envs.task_idxes
+        else:
+            self.n_tasks = 1
+            self.task_names = ["default"]
+            self.task_idxes = np.zeros(self.n_threads, dtype=np.int32)
+
+            EnvClass = (
+                SubprocVectorMAMuJoCoEnv if self.use_subproc
+                else VectorMAMuJoCoEnv
+            )
+            self.envs = EnvClass(
+                n_envs=self.n_threads,
+                scenario=env_cfg["scenario"],
+                agent_conf=env_cfg["agent_conf"],
+                episode_limit=env_cfg["episode_limit"],
+                orientation_penalty=env_cfg.get("orientation_penalty", 0.0),
+                action_rate_penalty=env_cfg.get("action_rate_penalty", 0.0),
+                healthy_height=env_cfg.get("healthy_height", 0.0),
+            )
+
         self.n_agents = self.envs.n_agents
         self.obs_dims = self.envs.obs_dims
         self.act_dims = self.envs.act_dims
@@ -222,13 +252,17 @@ class Trainer:
         t0 = [True] * self.n_threads
         episode_rewards = np.zeros(self.n_threads, dtype=np.float32)
         recent_returns: deque[float] = deque(maxlen=20)
+        per_task_returns: list[deque[float]] = [
+            deque(maxlen=20) for _ in range(self.n_tasks)
+        ]
         total_episodes = 0
         train_info: dict[str, float] = {}
         step_timer = time.time()
 
         print("=== Warmup: 收集随机数据 ===")
         obs_list, share_obs, t0 = self._warmup(
-            obs_list, share_obs, t0, episode_rewards, recent_returns,
+            obs_list, share_obs, t0, episode_rewards,
+            recent_returns, per_task_returns,
         )
 
         if train_cfg["warmup_train"]:
@@ -267,7 +301,9 @@ class Trainer:
             episode_rewards += rewards
             for i in range(self.n_threads):
                 if dones[i]:
-                    recent_returns.append(float(episode_rewards[i]))
+                    ep_ret = float(episode_rewards[i])
+                    recent_returns.append(ep_ret)
+                    per_task_returns[self.task_idxes[i]].append(ep_ret)
                     total_episodes += 1
                     episode_rewards[i] = 0.0
                     t0[i] = True
@@ -304,6 +340,7 @@ class Trainer:
                 self._log(
                     step, total_steps, recent_returns,
                     total_episodes, train_info, sps,
+                    per_task_returns,
                 )
                 step_timer = time.time()
 
@@ -322,6 +359,7 @@ class Trainer:
         t0: list[bool],
         episode_rewards: np.ndarray,
         recent_returns: deque,
+        per_task_returns: list[deque] | None = None,
     ) -> tuple[list, np.ndarray, list[bool]]:
         """收集随机动作数据用于预热。
 
@@ -330,6 +368,7 @@ class Trainer:
         :param t0: episode 开始标志
         :param episode_rewards: 当前 episode 累计奖励
         :param recent_returns: 最近回报
+        :param per_task_returns: 各任务的回报队列
         :return: 更新后的 (obs_list, share_obs, t0)
         """
         train_cfg = self.config["train"]
@@ -363,7 +402,10 @@ class Trainer:
             episode_rewards += rewards
             for i in range(self.n_threads):
                 if dones[i]:
-                    recent_returns.append(float(episode_rewards[i]))
+                    ep_ret = float(episode_rewards[i])
+                    recent_returns.append(ep_ret)
+                    if per_task_returns is not None:
+                        per_task_returns[self.task_idxes[i]].append(ep_ret)
                     episode_rewards[i] = 0.0
                     t0[i] = True
                 else:
@@ -757,6 +799,7 @@ class Trainer:
         total_episodes: int,
         train_info: dict[str, float],
         sps: float,
+        per_task_returns: list[deque] | None = None,
     ) -> None:
         """记录日志。
 
@@ -766,6 +809,7 @@ class Trainer:
         :param total_episodes: 总完成 episode 数
         :param train_info: 训练指标
         :param sps: 每秒环境步数
+        :param per_task_returns: 各任务的回报队列
         """
         gs = self.global_step
         avg_return = np.mean(recent_returns) if recent_returns else 0.0
@@ -774,6 +818,15 @@ class Trainer:
         self.writer.add_scalar("train/total_episodes", total_episodes, gs)
         self.writer.add_scalar("train/buffer_size", self.buffer.size, gs)
         self.writer.add_scalar("train/sps", sps, gs)
+
+        # Per-task 回报日志（多任务模式）
+        if per_task_returns is not None and self.n_tasks > 1:
+            for t in range(self.n_tasks):
+                if per_task_returns[t]:
+                    task_avg = np.mean(per_task_returns[t])
+                    self.writer.add_scalar(
+                        f"return/{self.task_names[t]}", task_avg, gs,
+                    )
 
         if train_info:
             for k, v in train_info.items():

@@ -15,6 +15,11 @@
 
 <!-- 新记录插入到此行下方，最新的在最上面 -->
 
+### 20260403-010000
+- **类型**: feat
+- **涉及文件**: `src/config/tasks.py`(新建), `src/envs/mamujoco.py`, `src/runner/trainer.py`, `src/config/multitask.json`(新建), `tests/test_multitask.py`(新建)
+- **摘要**: 阶段 1a 多任务基础设施。新建任务注册表（tolerance 函数 + HalfCheetah run/run_backwards 奖励函数，姿态要求融入 reward_fn 作为乘法因子）。新建 MultiTaskVectorMAMuJoCoEnv 多任务向量化环境（one-hot 任务编码嵌入观测、per-worker 任务分配）。改造 Trainer 支持多任务配置检测、per-task episode tracking 和 TensorBoard 日志。单任务向后兼容。22 项多任务测试全部通过。
+
 ### 20260402-233000
 - **类型**: feat
 - **涉及文件**: `src/envs/mamujoco.py`, `src/runner/trainer.py`, `src/config/default.json`
