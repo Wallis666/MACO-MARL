@@ -15,6 +15,11 @@
 
 <!-- 新记录插入到此行下方，最新的在最上面 -->
 
+### 20260402-220000
+- **类型**: feat
+- **涉及文件**: `src/envs/mamujoco.py`, `src/runner/trainer.py`, `src/config/default.json`
+- **摘要**: 添加朝向惩罚机制，防止 HalfCheetah 翻转后以头着地跑步。通过 `cos(rooty)` 计算身体朝向，翻转时施加惩罚。参数 `orientation_penalty` 可通过配置控制，默认 1.0。贯穿 MAMuJoCoEnv、SubprocVectorMAMuJoCoEnv、VectorMAMuJoCoEnv 三层环境封装。
+
 ### 20260402-190000
 - **类型**: refactor
 - **涉及文件**: `src/runner/trainer.py`, `src/envs/mamujoco.py`, `src/config/default.json`, `train.py`

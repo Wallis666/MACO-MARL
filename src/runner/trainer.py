@@ -74,6 +74,7 @@ class Trainer:
             scenario=env_cfg["scenario"],
             agent_conf=env_cfg["agent_conf"],
             episode_limit=env_cfg["episode_limit"],
+            orientation_penalty=env_cfg.get("orientation_penalty", 0.0),
         )
         self.n_agents = self.envs.n_agents
         self.obs_dims = self.envs.obs_dims

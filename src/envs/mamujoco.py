@@ -29,6 +29,7 @@ class MAMuJoCoEnv:
         agent_conf: str = "2x3",
         episode_limit: int = 1000,
         seed: int | None = None,
+        orientation_penalty: float = 0.0,
     ) -> None:
         self.env = mamujoco_v1.parallel_env(
             scenario=scenario,
@@ -38,6 +39,7 @@ class MAMuJoCoEnv:
         self.n_agents = len(self.env.possible_agents)
         self.episode_limit = episode_limit
         self._step_count = 0
+        self._orientation_penalty = orientation_penalty
 
         self.env.reset(seed=seed)
 
@@ -106,15 +108,37 @@ class MAMuJoCoEnv:
             dtype=np.float32,
         )
 
+        # 朝向惩罚：防止 HalfCheetah 翻转后以头着地跑步
+        orientation_pen = 0.0
+        if self._orientation_penalty > 0:
+            rooty = self._get_rooty_angle()
+            # 正立时 cos=1, upright=1, penalty=0
+            # 翻转时 cos=-1, upright=0, penalty=weight
+            upright = (1.0 + np.cos(rooty)) / 2.0
+            orientation_pen = self._orientation_penalty * (1.0 - upright)
+            rewards -= orientation_pen
+
         any_term = any(raw_terms[a] for a in self.env.possible_agents)
         any_trunc = any(raw_truncs[a] for a in self.env.possible_agents)
 
         info = {
             "per_agent_rewards": rewards,
             "bad_transition": any_trunc and not any_term,
+            "orientation_penalty": orientation_pen,
         }
 
         return obs, share_obs, rewards, any_term, any_trunc, info
+
+    def _get_rooty_angle(self) -> float:
+        """获取身体绕 Y 轴旋转角度（rooty）。
+
+        通过底层单智能体环境的 qpos[2] 获取。
+        HalfCheetah qpos 布局: [rootx, rootz, rooty, bthigh, bshin, bfoot, fthigh, fshin, ffoot]
+
+        :return: rooty 角度（弧度）
+        """
+        base_env = self.env.unwrapped.single_agent_env.unwrapped
+        return float(base_env.data.qpos[2])
 
     def _process_obs(
         self,
@@ -145,6 +169,7 @@ def _worker_fn(
     agent_conf: str,
     episode_limit: int,
     seed: int,
+    orientation_penalty: float = 0.0,
 ) -> None:
     """子进程工作函数。
 
@@ -153,12 +178,14 @@ def _worker_fn(
     :param agent_conf: 智能体拆分方式
     :param episode_limit: 最大步数
     :param seed: 随机种子
+    :param orientation_penalty: 朝向惩罚权重
     """
     env = MAMuJoCoEnv(
         scenario=scenario,
         agent_conf=agent_conf,
         episode_limit=episode_limit,
         seed=seed,
+        orientation_penalty=orientation_penalty,
     )
     while True:
         cmd, data = remote.recv()
@@ -210,6 +237,7 @@ class SubprocVectorMAMuJoCoEnv:
         agent_conf: str = "2x3",
         episode_limit: int = 1000,
         seed: int = 0,
+        orientation_penalty: float = 0.0,
     ) -> None:
         self.n_envs = n_envs
         self.remotes: list[mp.connection.Connection] = []
@@ -220,7 +248,10 @@ class SubprocVectorMAMuJoCoEnv:
             parent_conn, child_conn = ctx.Pipe()
             proc = ctx.Process(
                 target=_worker_fn,
-                args=(child_conn, scenario, agent_conf, episode_limit, seed + i),
+                args=(
+                    child_conn, scenario, agent_conf,
+                    episode_limit, seed + i, orientation_penalty,
+                ),
                 daemon=True,
             )
             proc.start()
@@ -323,6 +354,7 @@ class VectorMAMuJoCoEnv:
     :param agent_conf: 智能体拆分方式
     :param episode_limit: 最大步数
     :param seed: 基础随机种子
+    :param orientation_penalty: 朝向惩罚权重
     """
 
     def __init__(
@@ -332,6 +364,7 @@ class VectorMAMuJoCoEnv:
         agent_conf: str = "2x3",
         episode_limit: int = 1000,
         seed: int = 0,
+        orientation_penalty: float = 0.0,
     ) -> None:
         self.envs = [
             MAMuJoCoEnv(
@@ -339,6 +372,7 @@ class VectorMAMuJoCoEnv:
                 agent_conf=agent_conf,
                 episode_limit=episode_limit,
                 seed=seed + i,
+                orientation_penalty=orientation_penalty,
             )
             for i in range(n_envs)
         ]

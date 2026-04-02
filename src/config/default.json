@@ -61,6 +61,7 @@
     "env": {
         "scenario": "HalfCheetah",
         "agent_conf": "2x3",
-        "episode_limit": 1000
+        "episode_limit": 1000,
+        "orientation_penalty": 1.0
     }
 }
