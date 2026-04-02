@@ -75,6 +75,8 @@ class Trainer:
             agent_conf=env_cfg["agent_conf"],
             episode_limit=env_cfg["episode_limit"],
             orientation_penalty=env_cfg.get("orientation_penalty", 0.0),
+            action_rate_penalty=env_cfg.get("action_rate_penalty", 0.0),
+            healthy_height=env_cfg.get("healthy_height", 0.0),
         )
         self.n_agents = self.envs.n_agents
         self.obs_dims = self.envs.obs_dims

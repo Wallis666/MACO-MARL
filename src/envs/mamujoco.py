@@ -11,6 +11,33 @@ import numpy as np
 from gymnasium_robotics import mamujoco_v1
 
 
+def _gaussian_tolerance(
+    x: float,
+    lower: float,
+    margin: float,
+    value_at_margin: float = 0.1,
+) -> float:
+    """高斯型 tolerance 函数（参考 dm_control rewards.tolerance）。
+
+    x >= lower 时返回 1.0；
+    x < lower 时按高斯曲线平滑衰减，在 lower - margin 处返回 value_at_margin。
+
+    :param x: 输入值
+    :param lower: 下界阈值
+    :param margin: 衰减区间宽度
+    :param value_at_margin: margin 处的值
+    :return: [value_at_margin, 1.0] 之间的标量
+    """
+    if x >= lower:
+        return 1.0
+    if margin <= 0:
+        return value_at_margin
+    d = (x - lower) / margin
+    # 高斯核：exp(-0.5 * (d / sigma)^2)，令 sigma 使得 d=-1 时值为 value_at_margin
+    sigma = 1.0 / np.sqrt(-2.0 * np.log(value_at_margin))
+    return float(np.exp(-0.5 * (d / sigma) ** 2))
+
+
 class MAMuJoCoEnv:
     """MA-MuJoCo 多智能体环境封装。
 
@@ -30,6 +57,8 @@ class MAMuJoCoEnv:
         episode_limit: int = 1000,
         seed: int | None = None,
         orientation_penalty: float = 0.0,
+        action_rate_penalty: float = 0.0,
+        healthy_height: float = 0.0,
     ) -> None:
         self.env = mamujoco_v1.parallel_env(
             scenario=scenario,
@@ -40,6 +69,9 @@ class MAMuJoCoEnv:
         self.episode_limit = episode_limit
         self._step_count = 0
         self._orientation_penalty = orientation_penalty
+        self._action_rate_penalty = action_rate_penalty
+        self._healthy_height = healthy_height
+        self._prev_actions: np.ndarray | None = None
 
         self.env.reset(seed=seed)
 
@@ -81,6 +113,7 @@ class MAMuJoCoEnv:
         """
         raw_obs, _ = self.env.reset()
         self._step_count = 0
+        self._prev_actions = None
         return self._process_obs(raw_obs)
 
     def step(
@@ -118,6 +151,29 @@ class MAMuJoCoEnv:
             orientation_pen = self._orientation_penalty * (1.0 - upright)
             rewards -= orientation_pen
 
+        # 动作变化率惩罚：鼓励平滑连续的控制信号
+        action_rate_pen = 0.0
+        if self._action_rate_penalty > 0 and self._prev_actions is not None:
+            delta = actions - self._prev_actions
+            action_rate_pen = self._action_rate_penalty * float(
+                np.sum(delta ** 2) / self.n_agents,
+            )
+            rewards -= action_rate_pen
+        self._prev_actions = actions.copy()
+
+        # 高度奖励缩放：防止跪地/趴下跑步
+        # 参考 dm_control Walker 的乘法式设计：
+        # torso 高度正常时 height_scale=1，低于阈值时平滑衰减到 0
+        height_scale = 1.0
+        if self._healthy_height > 0:
+            torso_z = self._get_torso_z()
+            height_scale = _gaussian_tolerance(
+                torso_z,
+                lower=self._healthy_height,
+                margin=self._healthy_height * 0.5,
+            )
+            rewards *= height_scale
+
         any_term = any(raw_terms[a] for a in self.env.possible_agents)
         any_trunc = any(raw_truncs[a] for a in self.env.possible_agents)
 
@@ -125,9 +181,20 @@ class MAMuJoCoEnv:
             "per_agent_rewards": rewards,
             "bad_transition": any_trunc and not any_term,
             "orientation_penalty": orientation_pen,
+            "action_rate_penalty": action_rate_pen,
+            "height_scale": height_scale,
+            "torso_z": self._get_torso_z() if self._healthy_height > 0 else 0.0,
         }
 
         return obs, share_obs, rewards, any_term, any_trunc, info
+
+    def _get_torso_z(self) -> float:
+        """获取 torso 在世界坐标系下的 z 高度。
+
+        :return: torso z 坐标（米）
+        """
+        base_env = self.env.unwrapped.single_agent_env.unwrapped
+        return float(base_env.data.body("torso").xpos[2])
 
     def _get_rooty_angle(self) -> float:
         """获取身体绕 Y 轴旋转角度（rooty）。
@@ -170,6 +237,8 @@ def _worker_fn(
     episode_limit: int,
     seed: int,
     orientation_penalty: float = 0.0,
+    action_rate_penalty: float = 0.0,
+    healthy_height: float = 0.0,
 ) -> None:
     """子进程工作函数。
 
@@ -179,6 +248,8 @@ def _worker_fn(
     :param episode_limit: 最大步数
     :param seed: 随机种子
     :param orientation_penalty: 朝向惩罚权重
+    :param action_rate_penalty: 动作变化率惩罚权重
+    :param healthy_height: 健康高度阈值
     """
     env = MAMuJoCoEnv(
         scenario=scenario,
@@ -186,6 +257,8 @@ def _worker_fn(
         episode_limit=episode_limit,
         seed=seed,
         orientation_penalty=orientation_penalty,
+        action_rate_penalty=action_rate_penalty,
+        healthy_height=healthy_height,
     )
     while True:
         cmd, data = remote.recv()
@@ -238,6 +311,8 @@ class SubprocVectorMAMuJoCoEnv:
         episode_limit: int = 1000,
         seed: int = 0,
         orientation_penalty: float = 0.0,
+        action_rate_penalty: float = 0.0,
+        healthy_height: float = 0.0,
     ) -> None:
         self.n_envs = n_envs
         self.remotes: list[mp.connection.Connection] = []
@@ -250,7 +325,9 @@ class SubprocVectorMAMuJoCoEnv:
                 target=_worker_fn,
                 args=(
                     child_conn, scenario, agent_conf,
-                    episode_limit, seed + i, orientation_penalty,
+                    episode_limit, seed + i,
+                    orientation_penalty, action_rate_penalty,
+                    healthy_height,
                 ),
                 daemon=True,
             )
@@ -365,6 +442,8 @@ class VectorMAMuJoCoEnv:
         episode_limit: int = 1000,
         seed: int = 0,
         orientation_penalty: float = 0.0,
+        action_rate_penalty: float = 0.0,
+        healthy_height: float = 0.0,
     ) -> None:
         self.envs = [
             MAMuJoCoEnv(
@@ -373,6 +452,8 @@ class VectorMAMuJoCoEnv:
                 episode_limit=episode_limit,
                 seed=seed + i,
                 orientation_penalty=orientation_penalty,
+                action_rate_penalty=action_rate_penalty,
+                healthy_height=healthy_height,
             )
             for i in range(n_envs)
         ]

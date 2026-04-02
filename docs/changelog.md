@@ -15,6 +15,16 @@
 
 <!-- 新记录插入到此行下方，最新的在最上面 -->
 
+### 20260402-233000
+- **类型**: feat
+- **涉及文件**: `src/envs/mamujoco.py`, `src/runner/trainer.py`, `src/config/default.json`
+- **摘要**: 添加乘法式高度奖励缩放（healthy_height），防止 HalfCheetah 跪地/趴下跑步。参考 dm_control Walker 的设计，使用高斯 tolerance 函数：torso z >= 0.4m 时奖励不变，低于阈值时奖励平滑衰减（0.3m→56%，0.2m→10%，0.1m→0.6%）。跪着跑基本拿不到分，迫使策略学习正常站立跑步。
+
+### 20260402-230000
+- **类型**: feat
+- **涉及文件**: `src/envs/mamujoco.py`, `src/runner/trainer.py`, `src/config/default.json`
+- **摘要**: 添加动作变化率惩罚（action rate penalty），惩罚相邻时间步之间动作的剧烈变化 `||a_t - a_{t-1}||²`，鼓励策略输出平滑连续的控制信号。参数 `action_rate_penalty` 默认 0.1，参考 Isaac Gym legged_gym 的做法。reset 后首步不施加惩罚。
+
 ### 20260402-220000
 - **类型**: feat
 - **涉及文件**: `src/envs/mamujoco.py`, `src/runner/trainer.py`, `src/config/default.json`
