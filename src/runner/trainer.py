@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 from src.algorithms.actor import WorldModelActor
 from src.algorithms.critic import WorldModelCritic
@@ -229,11 +230,21 @@ class Trainer:
 
         if train_cfg["warmup_train"]:
             print("=== Warmup: 预训练世界模型 ===")
-            for _ in range(train_cfg["warmup_train_steps"]):
+            for _ in tqdm(
+                range(train_cfg["warmup_train_steps"]),
+                desc="WarmupTrain",
+                leave=False,
+            ):
                 self._model_train()
 
         print("=== 开始主训练 ===")
-        for step in range(1, total_steps + 1):
+        pbar = tqdm(
+            range(1, total_steps + 1),
+            desc="Training",
+            unit="step",
+            dynamic_ncols=True,
+        )
+        for step in pbar:
             self.global_step = step * self.n_threads
 
             actions = self._plan(obs_list, t0)
@@ -274,6 +285,16 @@ class Trainer:
 
                 self.critic.soft_update()
 
+            avg_ret = np.mean(recent_returns) if recent_returns else 0.0
+            pbar.set_postfix(
+                ep=total_episodes,
+                ret=f"{avg_ret:.1f}",
+                dyn=f"{train_info.get('dynamics_loss', 0):.4f}",
+                rew=f"{train_info.get('reward_loss', 0):.4f}",
+                ql=f"{train_info.get('q_loss', 0):.4f}",
+                ordered=True,
+            )
+
             if step % train_cfg["log_interval"] == 0:
                 elapsed = time.time() - step_timer
                 sps = train_cfg["log_interval"] * self.n_threads / max(elapsed, 1e-6)
@@ -286,6 +307,7 @@ class Trainer:
             if step % train_cfg["save_interval"] == 0:
                 self._save(step)
 
+        pbar.close()
         self.envs.close()
         self.writer.close()
         print("=== 训练完成 ===")
