@@ -31,16 +31,23 @@ def main() -> None:
         default="runs/phase0",
         help="日志和模型保存目录",
     )
+    parser.add_argument(
+        "--no_subproc",
+        action="store_true",
+        help="禁用多进程环境（调试用）",
+    )
     args = parser.parse_args()
 
     print(f"设备: {args.device}")
     print(f"配置: {args.config}")
     print(f"输出目录: {args.run_dir}")
+    print(f"多进程环境: {not args.no_subproc}")
 
     trainer = Trainer(
         config_path=args.config,
         device=args.device,
         run_dir=args.run_dir,
+        use_subproc=not args.no_subproc,
     )
     trainer.run()
 

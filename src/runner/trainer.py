@@ -6,6 +6,7 @@
 import json
 import os
 import time
+from collections import deque
 
 import numpy as np
 import torch
@@ -17,7 +18,7 @@ from src.algorithms.actor import WorldModelActor
 from src.algorithms.critic import WorldModelCritic
 from src.algorithms.planner import MPPIPlanner
 from src.buffer.replay_buffer import ReplayBuffer
-from src.envs.mamujoco import VectorMAMuJoCoEnv
+from src.envs.mamujoco import SubprocVectorMAMuJoCoEnv, VectorMAMuJoCoEnv
 from src.models.dynamics import DenseDynamics
 from src.models.encoder import MLPEncoder
 from src.models.reward import DenseReward
@@ -30,6 +31,7 @@ class Trainer:
     :param config_path: 配置文件路径
     :param device: 设备
     :param run_dir: 日志和模型保存目录
+    :param use_subproc: 是否使用多进程环境
     """
 
     def __init__(
@@ -37,12 +39,14 @@ class Trainer:
         config_path: str,
         device: str = "cpu",
         run_dir: str = "runs",
+        use_subproc: bool = True,
     ) -> None:
         with open(config_path, "r") as f:
             self.config = json.load(f)
 
         self.device = device
         self.run_dir = run_dir
+        self.use_subproc = use_subproc
         os.makedirs(run_dir, exist_ok=True)
 
         self._init_env()
@@ -60,7 +64,11 @@ class Trainer:
         train_cfg = self.config["train"]
         self.n_threads = train_cfg["n_rollout_threads"]
 
-        self.envs = VectorMAMuJoCoEnv(
+        EnvClass = (
+            SubprocVectorMAMuJoCoEnv if self.use_subproc
+            else VectorMAMuJoCoEnv
+        )
+        self.envs = EnvClass(
             n_envs=self.n_threads,
             scenario=env_cfg["scenario"],
             agent_conf=env_cfg["agent_conf"],
@@ -90,7 +98,6 @@ class Trainer:
             for i in range(self.n_agents)
         ]
 
-        total_act_dim = sum(self.act_dims)
         self.dynamics = DenseDynamics(
             latent_dim=latent_dim,
             action_dim=self.act_dims[0],
@@ -129,6 +136,7 @@ class Trainer:
             for i in range(self.n_agents)
         ]
 
+        total_act_dim = sum(self.act_dims)
         self.critic = WorldModelCritic(
             joint_latent_dim=latent_dim * self.n_agents,
             joint_action_dim=total_act_dim,
@@ -209,11 +217,14 @@ class Trainer:
         obs_list, share_obs = self.envs.reset()
         t0 = [True] * self.n_threads
         episode_rewards = np.zeros(self.n_threads, dtype=np.float32)
-        done_rewards: list[float] = []
+        recent_returns: deque[float] = deque(maxlen=20)
+        total_episodes = 0
+        train_info: dict[str, float] = {}
+        step_timer = time.time()
 
         print("=== Warmup: 收集随机数据 ===")
         obs_list, share_obs, t0 = self._warmup(
-            obs_list, share_obs, t0, episode_rewards, done_rewards,
+            obs_list, share_obs, t0, episode_rewards, recent_returns,
         )
 
         if train_cfg["warmup_train"]:
@@ -227,17 +238,7 @@ class Trainer:
 
             actions = self._plan(obs_list, t0)
 
-            actions_np = np.stack(
-                [
-                    np.stack(
-                        [actions[i][env_idx].cpu().numpy()
-                         for i in range(self.n_agents)],
-                        axis=0,
-                    )
-                    for env_idx in range(self.n_threads)
-                ],
-                axis=0,
-            )
+            actions_np = self._actions_to_numpy(actions)
 
             next_obs_list, next_share_obs, rewards, dones, truncs, infos = (
                 self.envs.step(actions_np)
@@ -252,7 +253,8 @@ class Trainer:
             episode_rewards += rewards
             for i in range(self.n_threads):
                 if dones[i]:
-                    done_rewards.append(episode_rewards[i])
+                    recent_returns.append(float(episode_rewards[i]))
+                    total_episodes += 1
                     episode_rewards[i] = 0.0
                     t0[i] = True
                 else:
@@ -268,13 +270,18 @@ class Trainer:
                 for _ in range(algo_cfg["update_per_train"]):
                     train_info = self._model_train()
                     if step % algo_cfg["policy_freq"] == 0:
-                        actor_info = self._actor_train()
+                        self._actor_train()
 
                 self.critic.soft_update()
 
             if step % train_cfg["log_interval"] == 0:
-                self._log(step, total_steps, done_rewards, train_info)
-                done_rewards.clear()
+                elapsed = time.time() - step_timer
+                sps = train_cfg["log_interval"] * self.n_threads / max(elapsed, 1e-6)
+                self._log(
+                    step, total_steps, recent_returns,
+                    total_episodes, train_info, sps,
+                )
+                step_timer = time.time()
 
             if step % train_cfg["save_interval"] == 0:
                 self._save(step)
@@ -289,7 +296,7 @@ class Trainer:
         share_obs: np.ndarray,
         t0: list[bool],
         episode_rewards: np.ndarray,
-        done_rewards: list[float],
+        recent_returns: deque,
     ) -> tuple[list, np.ndarray, list[bool]]:
         """收集随机动作数据用于预热。
 
@@ -297,7 +304,7 @@ class Trainer:
         :param share_obs: 全局观测
         :param t0: episode 开始标志
         :param episode_rewards: 当前 episode 累计奖励
-        :param done_rewards: 已完成 episode 的奖励
+        :param recent_returns: 最近回报
         :return: 更新后的 (obs_list, share_obs, t0)
         """
         train_cfg = self.config["train"]
@@ -331,7 +338,7 @@ class Trainer:
             episode_rewards += rewards
             for i in range(self.n_threads):
                 if dones[i]:
-                    done_rewards.append(episode_rewards[i])
+                    recent_returns.append(float(episode_rewards[i]))
                     episode_rewards[i] = 0.0
                     t0[i] = True
                 else:
@@ -342,10 +349,22 @@ class Trainer:
 
         print(
             f"  Warmup 完成，Buffer 大小: {self.buffer.size}，"
-            f"平均回报: {np.mean(done_rewards) if done_rewards else 0:.2f}",
+            f"平均回报: {np.mean(recent_returns) if recent_returns else 0:.2f}",
         )
-        done_rewards.clear()
+        recent_returns.clear()
         return obs_list, share_obs, t0
+
+    def _actions_to_numpy(
+        self,
+        actions: list[torch.Tensor],
+    ) -> np.ndarray:
+        """将 GPU tensor 动作转为 numpy。
+
+        :param actions: 各智能体动作列表
+        :return: 形状 (n_threads, n_agents, act_dim) 的 numpy 数组
+        """
+        agent_actions = torch.stack(actions, dim=1)
+        return agent_actions.cpu().numpy()
 
     def _plan(
         self,
@@ -364,7 +383,9 @@ class Trainer:
                 [obs_list[env_idx][i] for env_idx in range(self.n_threads)],
                 axis=0,
             )
-            obs_t = torch.tensor(obs_i, dtype=torch.float32, device=self.device)
+            obs_t = torch.as_tensor(
+                obs_i, dtype=torch.float32, device=self.device,
+            )
             z_i = self.encoders[i].encode(obs_t)
             zs.append(z_i)
 
@@ -448,60 +469,55 @@ class Trainer:
         :return: 训练指标字典
         """
         wm_cfg = self.config["world_model"]
-        algo_cfg = self.config["algo"]
         horizon = wm_cfg["horizon"]
         step_rho = wm_cfg["step_rho"]
-        latent_dim = wm_cfg["latent_dim"]
 
         batch = self.buffer.sample_horizon(horizon)
         nstep_batch = self.buffer.sample()
 
         obs_h = [
-            torch.tensor(batch["obs"][i], dtype=torch.float32, device=self.device)
+            torch.as_tensor(batch["obs"][i], dtype=torch.float32, device=self.device)
             for i in range(self.n_agents)
         ]
         actions_h = [
-            torch.tensor(batch["actions"][i], dtype=torch.float32, device=self.device)
+            torch.as_tensor(batch["actions"][i], dtype=torch.float32, device=self.device)
             for i in range(self.n_agents)
         ]
         next_obs_h = [
-            torch.tensor(batch["next_obs"][i], dtype=torch.float32, device=self.device)
+            torch.as_tensor(batch["next_obs"][i], dtype=torch.float32, device=self.device)
             for i in range(self.n_agents)
         ]
-        rewards_h = torch.tensor(
+        rewards_h = torch.as_tensor(
             batch["rewards"], dtype=torch.float32, device=self.device,
         )
 
-        nstep_reward = torch.tensor(
+        nstep_reward = torch.as_tensor(
             nstep_batch["nstep_reward"], dtype=torch.float32, device=self.device,
         )
-        nstep_gamma = torch.tensor(
+        nstep_gamma = torch.as_tensor(
             nstep_batch["nstep_gamma"], dtype=torch.float32, device=self.device,
         )
-        nstep_term = torch.tensor(
+        nstep_term = torch.as_tensor(
             nstep_batch["nstep_term"], dtype=torch.float32, device=self.device,
         )
         nstep_next_obs = [
-            torch.tensor(
+            torch.as_tensor(
                 nstep_batch["nstep_next_obs"][i],
-                dtype=torch.float32,
-                device=self.device,
+                dtype=torch.float32, device=self.device,
             )
             for i in range(self.n_agents)
         ]
         batch_obs = [
-            torch.tensor(
+            torch.as_tensor(
                 nstep_batch["obs"][i],
-                dtype=torch.float32,
-                device=self.device,
+                dtype=torch.float32, device=self.device,
             )
             for i in range(self.n_agents)
         ]
         batch_actions = [
-            torch.tensor(
+            torch.as_tensor(
                 nstep_batch["actions"][i],
-                dtype=torch.float32,
-                device=self.device,
+                dtype=torch.float32, device=self.device,
             )
             for i in range(self.n_agents)
         ]
@@ -529,7 +545,6 @@ class Trainer:
 
         dynamics_loss = torch.tensor(0.0, device=self.device)
         reward_loss = torch.tensor(0.0, device=self.device)
-        q_loss = torch.tensor(0.0, device=self.device)
 
         zs = [
             self.encoders[i].encode(obs_h[i][0])
@@ -545,7 +560,6 @@ class Trainer:
             )
 
             z_pred = self.dynamics.predict(z_joint, a_joint)
-
             r_logits = self.reward_model.predict(z_joint, a_joint)
 
             with torch.no_grad():
@@ -690,35 +704,43 @@ class Trainer:
         self,
         step: int,
         total_steps: int,
-        done_rewards: list[float],
-        train_info: dict[str, float] | None = None,
+        recent_returns: deque,
+        total_episodes: int,
+        train_info: dict[str, float],
+        sps: float,
     ) -> None:
         """记录日志。
 
         :param step: 当前步数
         :param total_steps: 总步数
-        :param done_rewards: 已完成 episode 的奖励
+        :param recent_returns: 最近完成的 episode 回报
+        :param total_episodes: 总完成 episode 数
         :param train_info: 训练指标
+        :param sps: 每秒环境步数
         """
         gs = self.global_step
-        avg_reward = np.mean(done_rewards) if done_rewards else 0.0
+        avg_return = np.mean(recent_returns) if recent_returns else 0.0
 
-        print(
-            f"[Step {step}/{total_steps}] "
-            f"EnvSteps={gs} | "
-            f"Episodes={len(done_rewards)} | "
-            f"AvgReturn={avg_reward:.2f}",
-            end="",
-        )
-
-        self.writer.add_scalar("train/avg_return", avg_reward, gs)
-        self.writer.add_scalar(
-            "train/buffer_size", self.buffer.size, gs,
-        )
+        self.writer.add_scalar("train/avg_return", avg_return, gs)
+        self.writer.add_scalar("train/total_episodes", total_episodes, gs)
+        self.writer.add_scalar("train/buffer_size", self.buffer.size, gs)
+        self.writer.add_scalar("train/sps", sps, gs)
 
         if train_info:
             for k, v in train_info.items():
                 self.writer.add_scalar(f"train/{k}", v, gs)
+
+        pct = step / total_steps * 100
+        print(
+            f"[{step}/{total_steps} ({pct:.1f}%)] "
+            f"EnvSteps={gs} | "
+            f"Ep={total_episodes} | "
+            f"Return={avg_return:.1f} | "
+            f"SPS={sps:.0f}",
+            end="",
+        )
+
+        if train_info:
             print(
                 f" | DynL={train_info.get('dynamics_loss', 0):.4f}"
                 f" | RewL={train_info.get('reward_loss', 0):.4f}"
