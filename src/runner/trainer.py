@@ -515,14 +515,11 @@ class Trainer:
         """
         task_emb = self._get_task_emb(self.task_idxes)
 
+        obs_arr = np.array(obs_list)  # (n_threads, n_agents, obs_dim)
         zs = []
         for i in range(self.n_agents):
-            obs_i = np.stack(
-                [obs_list[env_idx][i] for env_idx in range(self.n_threads)],
-                axis=0,
-            )
             obs_t = torch.as_tensor(
-                obs_i, dtype=torch.float32, device=self.device,
+                obs_arr[:, i], dtype=torch.float32, device=self.device,
             )
             z_i = self.encoders[i].encode(obs_t, task_emb)
             zs.append(z_i)
@@ -550,14 +547,11 @@ class Trainer:
         """
         task_emb = self._get_task_emb(self.task_idxes)
 
+        obs_arr = np.array(obs_list)  # (n_threads, n_agents, obs_dim)
         actions = []
         for i in range(self.n_agents):
-            obs_i = np.stack(
-                [obs_list[env_idx][i] for env_idx in range(self.n_threads)],
-                axis=0,
-            )
             obs_t = torch.as_tensor(
-                obs_i, dtype=torch.float32, device=self.device,
+                obs_arr[:, i], dtype=torch.float32, device=self.device,
             )
             z_i = self.encoders[i].encode(obs_t, task_emb)
             a_i = self.actors[i].get_actions(z_i, task_emb, stochastic=True)
@@ -588,28 +582,20 @@ class Trainer:
         :param next_obs_list: 下一步观测
         :param next_share_obs: 下一步全局观测
         """
-        obs_per_agent = [
-            np.stack(
-                [obs_list[env_idx][i] for env_idx in range(self.n_threads)],
-                axis=0,
-            )
-            for i in range(self.n_agents)
-        ]
+        # 向量化：一次转为 (n_threads, n_agents, obs_dim) 再按 agent 切片
+        obs_arr = np.array(obs_list)  # (n_threads, n_agents, obs_dim)
+        next_obs_arr = np.array(next_obs_list)
+        obs_per_agent = [obs_arr[:, i] for i in range(self.n_agents)]
         next_obs_per_agent = [
-            np.stack(
-                [next_obs_list[env_idx][i] for env_idx in range(self.n_threads)],
-                axis=0,
-            )
-            for i in range(self.n_agents)
+            next_obs_arr[:, i] for i in range(self.n_agents)
         ]
         actions_per_agent = [
             actions_np[:, i, :] for i in range(self.n_agents)
         ]
 
-        terms = np.zeros((self.n_threads, 1), dtype=np.float32)
-        for i in range(self.n_threads):
-            if dones[i] and not truncs[i]:
-                terms[i, 0] = 1.0
+        terms = (
+            dones.astype(np.float32) * (~truncs).astype(np.float32)
+        ).reshape(-1, 1)
 
         valid = [
             np.ones((self.n_threads, 1), dtype=np.float32)

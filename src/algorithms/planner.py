@@ -105,13 +105,14 @@ class MPPIPlanner:
             for i in range(self.n_agents)
         ]
 
+        # 向量化：用布尔掩码代替逐环境循环
+        t0_mask = torch.tensor(t0, device=self.device)
+        cont_mask = ~t0_mask  # 非 episode 开头的环境
         for i in range(self.n_agents):
             if self.running_mean[i] is not None:
-                for env_idx in range(n_threads):
-                    if not t0[env_idx]:
-                        act_mean[i][:-1, env_idx] = (
-                            self.running_mean[i][1:, env_idx]
-                        )
+                act_mean[i][:-1, cont_mask] = (
+                    self.running_mean[i][1:, cont_mask]
+                )
 
         pi_actions = None
         if self.num_pi_trajs > 0:
@@ -193,13 +194,13 @@ class MPPIPlanner:
                 ).clamp(self.min_std, self.max_std)
 
                 if iteration == self.iterations - 1:
-                    for env_idx in range(n_threads):
-                        idx = torch.multinomial(
-                            score[env_idx], 1,
-                        ).item()
-                        out_actions[i][env_idx] = (
-                            elite_actions[0, env_idx, idx]
-                        )
+                    # 向量化：批量 multinomial 代替逐环境循环
+                    idx = torch.multinomial(score, 1).squeeze(-1)
+                    out_actions[i] = elite_actions[
+                        0,
+                        torch.arange(n_threads, device=self.device),
+                        idx,
+                    ]
 
         for i in range(self.n_agents):
             self.running_mean[i] = act_mean[i].clone()

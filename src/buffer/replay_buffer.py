@@ -220,30 +220,16 @@ class ReplayBuffer:
         for _ in range(horizon - 1):
             indices.append(self._next(indices[-1]))
 
-        h_obs = [
-            np.stack(
-                [self.obs[i][indices[t]] for t in range(horizon)],
-                axis=0,
-            )
-            for i in range(self.n_agents)
-        ]
+        # 向量化：将 indices 列表转为 (horizon, batch) 数组后一次性索引
+        idx_arr = np.array(indices)  # (horizon, batch_size)
+        h_obs = [self.obs[i][idx_arr] for i in range(self.n_agents)]
         h_actions = [
-            np.stack(
-                [self.actions[i][indices[t]] for t in range(horizon)],
-                axis=0,
-            )
-            for i in range(self.n_agents)
+            self.actions[i][idx_arr] for i in range(self.n_agents)
         ]
         h_next_obs = [
-            np.stack(
-                [self.next_obs[i][indices[t]] for t in range(horizon)],
-                axis=0,
-            )
-            for i in range(self.n_agents)
+            self.next_obs[i][idx_arr] for i in range(self.n_agents)
         ]
-        h_rewards = np.stack(
-            [self.rewards[indices[t]] for t in range(horizon)], axis=0,
-        )
+        h_rewards = self.rewards[idx_arr]
 
         return {
             "obs": h_obs,
