@@ -246,6 +246,67 @@ class ReplayBuffer:
             "task_idx": self.task_idx[t0],
         }
 
+    def sample_context(
+        self,
+        n_context: int,
+        batch_size: int | None = None,
+    ) -> dict[str, np.ndarray | list[np.ndarray]]:
+        """采样上下文 transitions 用于上下文编码器训练。
+
+        对每个 batch 样本，从同一任务中随机采样 n_context 条 transition。
+
+        :param n_context: 每个样本的上下文 transition 数量 K
+        :param batch_size: 批次大小，默认使用 self.batch_size
+        :return: 字典，包含上下文观测、动作、奖励、下一步观测、task_idx
+        """
+        if batch_size is None:
+            batch_size = self.batch_size
+
+        # 构建 per-task 索引映射
+        valid_idx = np.arange(self.cur_size)
+        task_ids_all = self.task_idx[:self.cur_size]
+        unique_tasks = np.unique(task_ids_all)
+        task_pool = {
+            int(tid): valid_idx[task_ids_all == tid]
+            for tid in unique_tasks
+        }
+
+        # 随机为每个样本分配任务
+        sample_tasks = np.random.choice(unique_tasks, size=batch_size)
+
+        # 为每个样本从对应任务池中采样 n_context 条
+        ctx_indices = np.zeros(
+            (batch_size, n_context), dtype=np.int64,
+        )
+        for i in range(batch_size):
+            pool = task_pool[int(sample_tasks[i])]
+            ctx_indices[i] = np.random.choice(
+                pool, size=n_context, replace=len(pool) < n_context,
+            )
+
+        # 收集数据
+        ctx_obs = [
+            self.obs[agent][ctx_indices]
+            for agent in range(self.n_agents)
+        ]
+        ctx_actions = [
+            self.actions[agent][ctx_indices]
+            for agent in range(self.n_agents)
+        ]
+        ctx_rewards = self.rewards[ctx_indices]
+        ctx_next_obs = [
+            self.next_obs[agent][ctx_indices]
+            for agent in range(self.n_agents)
+        ]
+
+        return {
+            "ctx_obs": ctx_obs,
+            "ctx_actions": ctx_actions,
+            "ctx_rewards": ctx_rewards,
+            "ctx_next_obs": ctx_next_obs,
+            "task_idx": sample_tasks,
+        }
+
     def can_sample(self) -> bool:
         """是否可以采样。
 

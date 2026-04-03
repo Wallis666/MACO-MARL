@@ -2,7 +2,8 @@
 
 整合环境、世界模型、Actor/Critic、Buffer 和 MPPI 规划器，
 完成 warmup -> rollout -> model_train -> actor_train 的完整流程。
-多任务模式下通过可学习任务嵌入实现任务条件化。
+多任务模式下通过可学习任务嵌入实现任务条件化，
+上下文编码器学习从演示 transitions 推断任务嵌入。
 """
 import json
 import os
@@ -29,6 +30,7 @@ from src.envs.mamujoco import (
 from src.models.dynamics import DenseDynamics
 from src.models.encoder import MLPEncoder
 from src.models.reward import DenseReward
+from src.models.context_encoder import ContextEncoder
 from src.models.task_embedding import TaskEmbeddingTable
 from src.models.utils import TwoHotProcessor
 
@@ -134,6 +136,19 @@ class Trainer:
             ).to(self.device)
         else:
             self.task_embedding = None
+
+        # 上下文编码器（仅多任务模式）
+        if self.task_dim > 0:
+            ctx_cfg = self.config.get("context_encoder", {})
+            self.context_encoder = ContextEncoder(
+                obs_dim=self.obs_dims[0],
+                action_dim=self.act_dims[0],
+                task_dim=self.task_dim,
+                hidden_dims=ctx_cfg.get("hidden_dims", [256, 256]),
+                device=self.device,
+            )
+        else:
+            self.context_encoder = None
 
         self.encoders = [
             MLPEncoder(
@@ -263,6 +278,16 @@ class Trainer:
             )
         self.optimizer = torch.optim.Adam(param_groups, lr=lr)
 
+        # 上下文编码器独立优化器（遵循 VariBAD 原则，与世界模型梯度隔离）
+        if self.context_encoder is not None:
+            ctx_cfg = self.config.get("context_encoder", {})
+            self.ctx_optimizer = torch.optim.Adam(
+                self.context_encoder.parameters(),
+                lr=ctx_cfg.get("lr", lr),
+            )
+        else:
+            self.ctx_optimizer = None
+
     def _get_task_emb(
         self,
         task_indices: np.ndarray,
@@ -362,6 +387,11 @@ class Trainer:
                         self._actor_train()
 
                 self.critic.soft_update()
+
+                # 上下文编码器训练
+                if self.context_encoder is not None:
+                    ctx_info = self._context_encoder_train()
+                    train_info.update(ctx_info)
 
             avg_ret = np.mean(recent_returns) if recent_returns else 0.0
             pbar.set_postfix(
@@ -845,6 +875,62 @@ class Trainer:
 
         return {"actor_loss": np.mean(actor_losses)}
 
+    def _context_encoder_train(self) -> dict[str, float]:
+        """上下文编码器训练一步。
+
+        从缓冲区采样上下文 transitions，编码为任务嵌入，
+        与任务嵌入表的目标向量计算 MSE 损失。
+
+        :return: 训练指标字典
+        """
+        ctx_cfg = self.config.get("context_encoder", {})
+        n_context = ctx_cfg.get("n_context", 16)
+
+        ctx_batch = self.buffer.sample_context(n_context)
+
+        # 使用 agent 0 的 obs/actions/next_obs
+        ctx_obs = torch.as_tensor(
+            ctx_batch["ctx_obs"][0],
+            dtype=torch.float32, device=self.device,
+        )
+        ctx_actions = torch.as_tensor(
+            ctx_batch["ctx_actions"][0],
+            dtype=torch.float32, device=self.device,
+        )
+        ctx_rewards = torch.as_tensor(
+            ctx_batch["ctx_rewards"],
+            dtype=torch.float32, device=self.device,
+        )
+        ctx_next_obs = torch.as_tensor(
+            ctx_batch["ctx_next_obs"][0],
+            dtype=torch.float32, device=self.device,
+        )
+        task_ids = torch.as_tensor(
+            ctx_batch["task_idx"],
+            dtype=torch.long, device=self.device,
+        )
+
+        # 编码上下文 → 任务嵌入
+        z_ctx = self.context_encoder.encode_transitions(
+            ctx_obs, ctx_actions, ctx_rewards, ctx_next_obs,
+        )
+
+        # 目标：detach 的任务嵌入表查询
+        with torch.no_grad():
+            z_target = self.task_embedding(task_ids)
+
+        ctx_loss = F.mse_loss(z_ctx, z_target)
+
+        self.ctx_optimizer.zero_grad()
+        ctx_loss.backward()
+        nn.utils.clip_grad_norm_(
+            self.context_encoder.parameters(),
+            self.config["algo"]["grad_clip"],
+        )
+        self.ctx_optimizer.step()
+
+        return {"ctx_loss": ctx_loss.item()}
+
     def _log(
         self,
         step: int,
@@ -930,5 +1016,8 @@ class Trainer:
         }
         if self.task_embedding is not None:
             state["task_embedding"] = self.task_embedding.state_dict()
+        if self.context_encoder is not None:
+            state["context_encoder"] = self.context_encoder.state_dict()
+            state["ctx_optimizer"] = self.ctx_optimizer.state_dict()
         torch.save(state, path)
         print(f"  模型已保存至 {path}")

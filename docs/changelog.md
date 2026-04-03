@@ -15,6 +15,11 @@
 
 <!-- 新记录插入到此行下方，最新的在最上面 -->
 
+### 20260404-010000
+- **类型**: feat
+- **涉及文件**: `src/models/context_encoder.py`（新建）, `src/buffer/replay_buffer.py`, `src/runner/trainer.py`, `src/config/multitask.json`, `tests/test_context_encoder.py`（新建）
+- **摘要**: 阶段 3 — 上下文编码器。实现 PEARL 风格上下文编码器（MLP + 均值池化 + L2 归一化），从 K 条演示 transitions 推断任务嵌入向量，训练目标为 MSE 对齐已学会的任务嵌入（detach 目标）。Buffer 新增 `sample_context()` 按任务分组采样。Trainer 集成独立优化器和 `_context_encoder_train()` 训练步。检查点保存 context_encoder 和 ctx_optimizer 状态。`multitask.json` 新增 `context_encoder` 配置段。64 个测试全部通过。
+
 ### 20260403-230000
 - **类型**: fix
 - **涉及文件**: `scripts/evaluate.py`
