@@ -40,28 +40,39 @@
 
 ### 4.1 世界模型
 
-- 采用 MoE 架构（参考 M3W-MARL），SoftMoE 动力学 + SparseMoE 奖励。
-- 先用 Dense 基线验证 pipeline 正确性，再升级为 MoE。
-- 世界模型在潜空间中运行，不含解码器。
+- 采用 Dense 架构 + 任务条件化（已放弃 MoE 路线）
+- 所有组件（Encoder、Dynamics、Reward）通过 FiLM 条件化接收任务向量
+- 世界模型在潜空间中运行，不含解码器
+- 参考：TD-MPC2（80 任务）和 Newt（200 任务）验证了 Dense 多任务世界模型的可行性
 
 ### 4.2 策略优化 / 规划
 
-- 可选方案 A：想象空间训练（Dreamer 风格）+ SAC / MAPPO
-- 可选方案 B：MPPI 规划器（TD-MPC 风格），Actor 仅作为候选动作生成器
+- 训练：想象空间训练（Dreamer 风格）+ SAC
+- 评估：MPPI 规划器可选使用
 - 遵循 CTDE 范式：集中式训练，分散式执行
 
-### 4.3 Few-shot 适应（核心创新）
+### 4.3 多任务泛化机制
 
-- 方案 A：上下文编码器 — 将 few-shot 轨迹编码为 task embedding，注入世界模型各组件
-- 方案 B：MoE 路由适应 — 用 few-shot 轨迹推断新任务的路由权重，不更新专家参数
-- 两种方案可组合使用
+- **可学习任务嵌入**：训练阶段，每个已知任务分配一个可学习向量 `e_k`（L2 归一化），作为任务身份标识注入世界模型各组件
+- **FiLM 条件化**：将任务向量通过特征级仿射变换 `FiLM(h) = γ·h + β` 注入各层，比拼接表达力更强且开销极低（参考 Perez et al. 2018）
+- 训练时用 task ID 索引嵌入；评估已知任务时同样用 task ID
+
+### 4.4 Few-shot 适应（核心创新）
+
+- **上下文编码器**：将 few-shot 演示轨迹 `{(s,a,r,s')...}` 编码为任务向量 `z`（参考 PEARL/FOCAL）
+  - 架构：MLP 编码每条转换 → 置换不变聚合（均值池化或注意力池化）→ 任务向量
+  - 训练目标：编码器输出 `z` 逼近对应任务的可学习嵌入 `e_k`（MSE 或对比损失）
+  - 同时用编码器输出替代嵌入进行世界模型前向，确保编码器输出可用
+- **适应流程**：冻结所有参数 → 新任务 5-10 条轨迹 → 上下文编码器 → 任务向量 `z` → FiLM 条件化世界模型 → MPPI 规划或 Actor 推理
+- **零梯度更新**：适应阶段不更新任何参数
 
 ## 5. 参考代码库
 
 | 代码库 | 位置 | 说明 |
 |--------|------|------|
 | DIMA | `references/DIMA/` | 基于扩散模型的多智能体世界模型（NeurIPS 2025） |
-| M3W-MARL | `references/m3w-marl/` | 基于 MoE 的多任务世界模型（NeurIPS 2025） |
+| M3W-MARL | `references/m3w-marl/` | 基于 MoE 的多任务世界模型（NeurIPS 2025），参考世界模型架构和训练流程 |
+| HiSSD | `references/HiSSD/` | 分层可分离技能发现的离线多任务 MARL（ICLR 2025），参考技能分解与多任务迁移 |
 | dm_control | `references/dm_control/` | DeepMind Control Suite，参考任务定义和奖励设计 |
 
 ## 6. 评估指标
@@ -77,7 +88,7 @@
 ## 7. 约束
 
 - 目标环境仅限连续动作空间（受 MPPI 规划器限制）。
-- 参考代码库（`references/` 下）只读，不得修改。
+- 参考代码库（`references/` 下，含 DIMA、M3W-MARL、HiSSD、dm_control）只读，不得修改。
 - 所有 Python 命令在 `maco` conda 环境中执行。
 
 ## 8. 扩展性规划

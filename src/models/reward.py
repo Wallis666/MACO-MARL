@@ -1,7 +1,7 @@
-"""Dense 奖励模型（阶段 0 基线）。
+"""Dense 奖励模型。
 
 集中式预测：输入所有智能体的联合状态和动作，
-预测奖励的 two-hot 分布 logits。阶段 3 将替换为 SparseMoE 版本。
+预测奖励的 two-hot 分布 logits。多任务通过 FiLM 任务条件化实现。
 """
 import torch
 import torch.nn as nn

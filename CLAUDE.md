@@ -4,9 +4,10 @@
 
 本科毕设项目。构建一个**基于世界模型的多任务多智能体强化学习（MT-MARL）框架，支持 few-shot 快速适应**。核心目标：在多个已知任务上联合训练后，仅凭几条新任务的演示轨迹（无需梯度更新）即可适应未见过的新任务。
 
-本项目参考三个代码库：
+本项目参考四个代码库：
 - **DIMA**（`references/DIMA/`）：基于扩散模型的多智能体世界模型（NeurIPS 2025）
-- **M3W-MARL**（`references/m3w-marl/`）：基于 MoE 的多任务世界模型（NeurIPS 2025）— 主要参考
+- **M3W-MARL**（`references/m3w-marl/`）：基于 MoE 的多任务世界模型（NeurIPS 2025）— 参考世界模型架构和训练流程
+- **HiSSD**（`references/HiSSD/`）：分层可分离技能发现的离线多任务 MARL（ICLR 2025）— 参考技能分解与多任务迁移
 - **dm_control**（`references/dm_control/`）：DeepMind Control Suite — 参考任务定义和奖励设计
 
 目标环境：**MA-MuJoCo**（多智能体 MuJoCo）。
@@ -15,17 +16,18 @@
 
 | 阶段 | 说明 | 状态 |
 |------|------|------|
-| 阶段 0 | 单任务验证（用 Dense 世界模型在单个 MA-MuJoCo 任务上跑通） | 未开始 |
-| 阶段 1 | 多任务基础设施（奖励归一化、观测/动作空间对齐） | 未开始 |
-| 阶段 2 | Dense 多任务世界模型（验证 pipeline 正确性） | 未开始 |
-| 阶段 3 | MoE 升级（SoftMoE 动力学 + SparseMoE 奖励） | 未开始 |
-| 阶段 4 | Few-shot 适应机制（上下文编码器 / 路由适应） | 未开始 |
+| 阶段 0 | 单任务验证（Dense 世界模型 + Dreamer 风格训练） | 已完成 |
+| 阶段 1 | 多任务基础设施（任务注册表、向量化环境、per-task 日志） | 已完成 |
+| 阶段 2 | 任务条件化世界模型（可学习任务嵌入 + FiLM 条件化） | 未开始 |
+| 阶段 3 | 上下文编码器（轨迹 → 任务嵌入，对齐训练嵌入空间） | 未开始 |
+| 阶段 4 | Few-shot 适应评估（冻结模型，上下文编码器推断任务） | 未开始 |
 | 阶段 5 | 实验评估与消融实验 | 未开始 |
 
 ### 上次尝试的已知问题
 - 多任务训练未能收敛（回报不到理想值的 10%）
 - 疑似原因：奖励尺度未对齐、观测/动作空间对齐 bug、或世界模型预测误差过大
-- 优先事项：先用 Dense 模型验证 pipeline 正确性，再添加 MoE 复杂度
+- 已放弃 MoE 路线，改用 Dense 模型 + 任务条件化（可学习嵌入 + FiLM + 上下文编码器）
+- 参考：TD-MPC2 用纯 Dense 模型成功训练 80 个多样化任务，Newt 扩展到 200 个任务
 
 ---
 
@@ -59,6 +61,7 @@
 |------|------|
 | `DIMA.pdf` | DIMA 论文 — 基于扩散模型的多智能体世界模型（NeurIPS 2025） |
 | `M3W-MARL.pdf` | M3W 论文 — 基于 MoE 的多任务世界模型（NeurIPS 2025） |
+| `HiSSD.pdf` | HiSSD 论文 — 分层可分离技能发现的离线多任务 MARL（ICLR 2025） |
 
 ### 参考代码库关键路径
 
@@ -78,6 +81,14 @@
 - `m3w/algorithms/critics/world_model_critic.py` — Critic 网络
 - `m3w/common/buffers/world_model_buffer.py` — 经验回放缓冲区
 - `m3w/envs/mujoco/` — MA-MuJoCo 环境封装
+
+**HiSSD**（`references/HiSSD/`，只读）：
+- `src/main.py` — 训练入口
+- `src/modules/agents/multi_task/hissd_agent.py` — HiSSD 智能体（通用技能 + 任务特定技能）
+- `src/modules/agents/multi_task/vq_skill.py` — VQ-VAE 技能编码器
+- `src/learners/multi_task/hissd_learner.py` — HiSSD 学习器
+- `src/controllers/multi_task/mt_hissd_controller.py` — 多任务控制器
+- `src/runners/multi_task/episode_ada_runner.py` — 适应阶段 Runner
 
 **dm_control**（`references/dm_control/`，只读）：
 - `dm_control/suite/` — 各类 MuJoCo 任务定义
@@ -162,14 +173,15 @@ conda run -n maco pip install <包名>
 2. **项目目标**：基于世界模型的 MT-MARL，支持对未见任务的 few-shot 适应
 3. **当前阶段**：参见上方路线图表格中的最新状态
 4. **上次失败经验**：多任务训练收敛到理想值的不到 10% — 大概率是工程问题（奖励尺度、观测对齐），而非算法问题
-5. **开发策略**：先 Dense → 验证 pipeline → 再 MoE → 最后 few-shot
-6. **参考代码库只读**：`references/` 下的 DIMA、m3w-marl、dm_control 不得修改
+5. **开发策略**：Dense + 任务条件化（FiLM）→ 上下文编码器 → few-shot 适应
+6. **参考代码库只读**：`references/` 下的 DIMA、m3w-marl、HiSSD、dm_control 不得修改
 7. **目标环境**：MA-MuJoCo（连续动作空间，多智能体）
 
 ### 技术决策
-- 优先采用 MoE 路线（M3W 风格），但先用 Dense 作为基线验证
-- Few-shot = 基于上下文的适应（几条轨迹，无需梯度更新）
-- 策略学习：想象空间训练（Dreamer 风格）或 MPPI 规划（TD-MPC 风格）
+- 已放弃 MoE 路线，改用 Dense 世界模型 + 任务条件化（参考 TD-MPC2/Newt）
+- 多任务泛化方案：可学习任务嵌入（训练）+ 上下文编码器（适应）+ FiLM 条件化（注入）
+- Few-shot = 基于上下文的适应（几条轨迹通过编码器 → 任务向量，无需梯度更新）
+- 策略学习：想象空间训练（Dreamer 风格），MPPI 保留供评估
 - 遵循 CTDE 范式：集中式训练，分散式执行
 
 ### 持续保留项
@@ -180,6 +192,6 @@ conda run -n maco pip install <包名>
 
 ### 文件位置
 - 项目根目录：`C:\Users\11242\Desktop\temp`
-- 参考代码库：`C:\Users\11242\Desktop\temp\references\`（DIMA、m3w-marl、dm_control）
-- 论文文件：项目根目录下的 `DIMA.pdf` 和 `M3W-MARL.pdf`
+- 参考代码库：`C:\Users\11242\Desktop\temp\references\`（DIMA、m3w-marl、HiSSD、dm_control）
+- 论文文件：项目根目录下的 `DIMA.pdf`、`M3W-MARL.pdf` 和 `HiSSD.pdf`
 - 项目文档：`C:\Users\11242\Desktop\temp\docs\`
