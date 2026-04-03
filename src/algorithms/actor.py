@@ -2,6 +2,7 @@
 
 高斯策略 Actor，每个智能体独立维护一个策略网络。
 输入潜在状态，输出 tanh 压缩后的连续动作。
+多任务模式下通过拼接任务嵌入实现任务条件化。
 """
 import math
 
@@ -9,14 +10,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.models.task_embedding import cat_task_emb
+
 
 class GaussianPolicy(nn.Module):
     """高斯策略网络（Squashed Gaussian）。
 
     输出均值和对数标准差，通过重参数化采样并用 tanh 压缩到动作范围。
+    多任务时输入维度为 latent_dim + task_dim。
 
-    :param latent_dim: 潜在状态维度（输入维度）
+    :param latent_dim: 潜在状态维度
     :param action_dim: 动作维度
+    :param task_dim: 任务嵌入维度，0 表示单任务
     :param hidden_sizes: 隐藏层维度列表
     :param log_std_min: 对数标准差下界
     :param log_std_max: 对数标准差上界
@@ -27,6 +32,7 @@ class GaussianPolicy(nn.Module):
         self,
         latent_dim: int,
         action_dim: int,
+        task_dim: int = 0,
         hidden_sizes: list[int] | None = None,
         log_std_min: float = -10.0,
         log_std_max: float = 2.0,
@@ -40,7 +46,7 @@ class GaussianPolicy(nn.Module):
         self.action_dim = action_dim
 
         layers: list[nn.Module] = []
-        dims = [latent_dim] + hidden_sizes
+        dims = [latent_dim + task_dim] + hidden_sizes
         for i in range(len(dims) - 1):
             layers.append(nn.Linear(dims[i], dims[i + 1]))
             layers.append(nn.ReLU())
@@ -53,17 +59,19 @@ class GaussianPolicy(nn.Module):
     def forward(
         self,
         z: torch.Tensor,
+        task_emb: torch.Tensor | None = None,
         stochastic: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """前向传播，生成动作和对数概率。
 
         :param z: 潜在状态，形状 (batch, latent_dim)
-        :param stochastic: 是否随机采样
+        :param task_emb: 任务嵌入，形状 (batch, task_dim) 或 None
+        :param stochastic: ��否随机采样
         :return: (action, log_prob)
             - action: 形状 (batch, action_dim)，范围 [-1, 1]
             - log_prob: 形状 (batch, 1)，随机模式下返回
         """
-        h = self.net(z)
+        h = self.net(cat_task_emb(z, task_emb))
         mu = self.mu_layer(h)
         log_std = self.log_std_layer(h)
         log_std = self.log_std_min + 0.5 * (
@@ -116,6 +124,7 @@ class WorldModelActor:
 
     :param latent_dim: 潜在状态维度
     :param action_dim: 动作维度
+    :param task_dim: 任务嵌入维度，0 表示单任务
     :param hidden_sizes: 隐藏层维度
     :param lr: 学习率
     :param log_std_min: 对数标准差下界
@@ -127,6 +136,7 @@ class WorldModelActor:
         self,
         latent_dim: int,
         action_dim: int,
+        task_dim: int = 0,
         hidden_sizes: list[int] | None = None,
         lr: float = 3e-4,
         log_std_min: float = -10.0,
@@ -136,6 +146,7 @@ class WorldModelActor:
         self.policy = GaussianPolicy(
             latent_dim=latent_dim,
             action_dim=action_dim,
+            task_dim=task_dim,
             hidden_sizes=hidden_sizes,
             log_std_min=log_std_min,
             log_std_max=log_std_max,
@@ -149,28 +160,32 @@ class WorldModelActor:
     def get_actions(
         self,
         z: torch.Tensor,
+        task_emb: torch.Tensor | None = None,
         stochastic: bool = True,
     ) -> torch.Tensor:
         """获取动作（不带梯度）。
 
         :param z: 潜在状态
+        :param task_emb: 任务嵌入
         :param stochastic: 是否随机
         :return: 动作
         """
         with torch.no_grad():
-            action, _ = self.policy(z, stochastic=stochastic)
+            action, _ = self.policy(z, task_emb, stochastic=stochastic)
         return action
 
     def get_actions_with_logprobs(
         self,
         z: torch.Tensor,
+        task_emb: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """获取动作和对数概率（带梯度）。
 
         :param z: 潜在状态
+        :param task_emb: 任务嵌入
         :return: (action, log_prob)
         """
-        return self.policy(z, stochastic=True)
+        return self.policy(z, task_emb, stochastic=True)
 
     def turn_on_grad(self) -> None:
         """启用策略参数梯度。"""

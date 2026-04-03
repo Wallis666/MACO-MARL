@@ -1,12 +1,13 @@
 """Dense 动力学模型。
 
 集中式预测：输入所有智能体的联合状态和动作，
-预测下一时刻的联合潜在状态。多任务通过 FiLM 任务条件化实现。
+预测下一时刻的联合潜在状态。多任务通过拼接任务嵌入实现条件化。
 """
 import torch
 import torch.nn as nn
 from einops import rearrange
 
+from src.models.task_embedding import cat_task_emb
 from src.models.utils import SimNorm, create_mlp
 
 
@@ -15,10 +16,12 @@ class DenseDynamics(nn.Module):
 
     输入所有智能体的潜在状态和动作的拼接，
     预测每个智能体下一时刻的潜在状态。
+    多任务时输入末尾拼接任务嵌入。
 
     :param latent_dim: 单个智能体的潜在状态维度
     :param action_dim: 单个智能体的动作维度
     :param n_agents: 智能体数量
+    :param task_dim: 任务嵌入维度，0 表示单任务
     :param hidden_dims: 隐藏层维度列表
     :param simnorm_dim: SimNorm 分组大小
     :param device: 设备
@@ -29,6 +32,7 @@ class DenseDynamics(nn.Module):
         latent_dim: int,
         action_dim: int,
         n_agents: int,
+        task_dim: int = 0,
         hidden_dims: list[int] | None = None,
         simnorm_dim: int = 8,
         device: str = "cpu",
@@ -41,7 +45,7 @@ class DenseDynamics(nn.Module):
         if hidden_dims is None:
             hidden_dims = [512, 512]
 
-        in_dim = n_agents * (latent_dim + action_dim)
+        in_dim = n_agents * (latent_dim + action_dim) + task_dim
         out_dim = n_agents * latent_dim
 
         self.mlp = create_mlp(
@@ -56,16 +60,18 @@ class DenseDynamics(nn.Module):
         self,
         z: torch.Tensor,
         a: torch.Tensor,
+        task_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """预测下一时刻的潜在状态。
 
         :param z: 当前潜在状态，形状 (batch, n_agents, latent_dim)
         :param a: 当前动作，形状 (batch, n_agents, action_dim)
+        :param task_emb: 任务嵌入，形状 (batch, task_dim) 或 None
         :return: 下一时刻潜在状态，形状 (batch, n_agents, latent_dim)
         """
-        batch_size = z.shape[0]
         za = torch.cat([z, a], dim=-1)
         za_flat = rearrange(za, "b n d -> b (n d)")
+        za_flat = cat_task_emb(za_flat, task_emb)
         out_flat = self.mlp(za_flat)
         return rearrange(
             out_flat,
@@ -78,11 +84,13 @@ class DenseDynamics(nn.Module):
         self,
         z: torch.Tensor,
         a: torch.Tensor,
+        task_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """前向传播，等价于 predict。
 
         :param z: 当前潜在状态
         :param a: 当前动作
+        :param task_emb: 任务嵌入
         :return: 预测的下一时刻潜在状态
         """
-        return self.predict(z, a)
+        return self.predict(z, a, task_emb)

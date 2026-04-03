@@ -155,7 +155,7 @@ class TestRewardFunctions:
 
 
 # ---------------------------------------------------------------------------
-# 4. 多任务环境测试
+# 4. 多任务环境测试（不含 one-hot）
 # ---------------------------------------------------------------------------
 
 class TestMultiTaskEnv:
@@ -177,21 +177,10 @@ class TestMultiTaskEnv:
         """任务分配正确：前半 task 0，后半 task 1。"""
         assert list(mt_env.task_idxes) == [0, 0, 1, 1]
 
-    def test_obs_dims_augmented(self, mt_env) -> None:
-        """观测维度包含 one-hot（+2）。"""
-        # HalfCheetah 2x3 原始 obs_dim 约 12，加 2 任务 one-hot
+    def test_raw_obs_dims(self, mt_env) -> None:
+        """观测维度为原始值（不含 one-hot）。"""
         for d in mt_env.obs_dims:
-            assert d > 2  # 至少包含 one-hot
-
-    def test_onehot_prefix(self, mt_env) -> None:
-        """观测前两维是正确的 one-hot 编码。"""
-        obs_list, _ = mt_env.reset()
-        # env 0,1 → task 0 → [1, 0]
-        assert obs_list[0][0][0] == 1.0
-        assert obs_list[0][0][1] == 0.0
-        # env 2,3 → task 1 → [0, 1]
-        assert obs_list[2][0][0] == 0.0
-        assert obs_list[2][0][1] == 1.0
+            assert d > 0
 
     def test_share_obs_shape(self, mt_env) -> None:
         """全局观测维度正确。"""
@@ -228,91 +217,104 @@ class TestMultiTaskEnv:
 
 
 # ---------------------------------------------------------------------------
-# 5. Shape 传播测试（增强 obs → encoder → models）
+# 5. 任务嵌入 + 模型管线集成测试
 # ---------------------------------------------------------------------------
 
-class TestShapePropagation:
-    """验证增强后的 obs_dim 能正确传播到所有模型。"""
+class TestTaskEmbeddingIntegration:
+    """验证任务嵌入在多任务模型管线中的传播。"""
 
-    def test_encoder_with_augmented_obs(self) -> None:
-        """Encoder 接受增强后的 obs_dim。"""
+    def test_encoder_with_task_emb(self) -> None:
+        """Encoder 接受原始 obs + 任务嵌入。"""
         from src.models.encoder import MLPEncoder
+        from src.models.task_embedding import TaskEmbeddingTable
 
         n_tasks = 2
+        task_dim = 32
         raw_obs_dim = 12
-        aug_obs_dim = raw_obs_dim + n_tasks
 
+        table = TaskEmbeddingTable(n_tasks=n_tasks, task_dim=task_dim)
         enc = MLPEncoder(
-            obs_dim=aug_obs_dim,
+            obs_dim=raw_obs_dim,
             latent_dim=128,
+            task_dim=task_dim,
             hidden_dims=[512, 512],
             simnorm_dim=8,
             device="cpu",
         )
-        x = torch.randn(32, aug_obs_dim)
-        z = enc.encode(x)
-        assert z.shape == (32, 128)
+        task_ids = torch.tensor([0, 0, 1, 1])
+        task_emb = table(task_ids)
 
-    def test_full_pipeline_shapes(self) -> None:
-        """增强 obs → encoder → dynamics → reward → actor → critic。"""
+        x = torch.randn(4, raw_obs_dim)
+        z = enc.encode(x, task_emb)
+        assert z.shape == (4, 128)
+
+    def test_full_pipeline_with_task_emb(self) -> None:
+        """原始 obs + 任务嵌入 → encoder → dynamics → reward → actor → critic。"""
         from src.algorithms.actor import GaussianPolicy
         from src.algorithms.critic import WorldModelCritic
         from src.models.dynamics import DenseDynamics
         from src.models.encoder import MLPEncoder
         from src.models.reward import DenseReward
+        from src.models.task_embedding import TaskEmbeddingTable
 
         n_tasks = 2
+        task_dim = 32
         raw_obs_dim = 12
-        aug_obs_dim = raw_obs_dim + n_tasks
         latent_dim = 128
         act_dim = 3
         n_agents = 2
         batch = 16
 
+        table = TaskEmbeddingTable(n_tasks=n_tasks, task_dim=task_dim)
+        task_ids = torch.randint(0, n_tasks, (batch,))
+        task_emb = table(task_ids)
+
         enc = MLPEncoder(
-            obs_dim=aug_obs_dim, latent_dim=latent_dim,
+            obs_dim=raw_obs_dim, latent_dim=latent_dim,
+            task_dim=task_dim,
             hidden_dims=[256, 256], simnorm_dim=8, device="cpu",
         )
         dyn = DenseDynamics(
             latent_dim=latent_dim, action_dim=act_dim,
-            n_agents=n_agents, hidden_dims=[256, 256],
-            simnorm_dim=8, device="cpu",
+            n_agents=n_agents, task_dim=task_dim,
+            hidden_dims=[256, 256], simnorm_dim=8, device="cpu",
         )
         rew = DenseReward(
             latent_dim=latent_dim, action_dim=act_dim,
-            n_agents=n_agents, num_bins=101,
-            hidden_dims=[256, 256], device="cpu",
+            n_agents=n_agents, task_dim=task_dim,
+            num_bins=101, hidden_dims=[256, 256], device="cpu",
         )
         actor = GaussianPolicy(
             latent_dim=latent_dim, action_dim=act_dim,
+            task_dim=task_dim,
             hidden_sizes=[128, 128], device="cpu",
         )
         critic = WorldModelCritic(
             joint_latent_dim=latent_dim * n_agents,
             joint_action_dim=act_dim * n_agents,
+            task_dim=task_dim,
             num_bins=101, reward_min=-10, reward_max=10,
             hidden_sizes=[256, 256], device="cpu",
         )
 
-        # Forward pass
-        obs = torch.randn(batch, aug_obs_dim)
-        z = enc.encode(obs)
+        obs = torch.randn(batch, raw_obs_dim)
+        z = enc.encode(obs, task_emb)
         assert z.shape == (batch, latent_dim)
 
         z_joint = z.unsqueeze(1).expand(-1, n_agents, -1)
         a = torch.randn(batch, n_agents, act_dim)
-        z_next = dyn.predict(z_joint, a)
+        z_next = dyn.predict(z_joint, a, task_emb)
         assert z_next.shape == (batch, n_agents, latent_dim)
 
-        r_logits = rew.predict(z_joint, a)
+        r_logits = rew.predict(z_joint, a, task_emb)
         assert r_logits.shape[0] == batch
 
-        act, _ = actor(z, stochastic=True)
+        act, _ = actor(z, task_emb, stochastic=True)
         assert act.shape == (batch, act_dim)
 
         joint_z = z.unsqueeze(1).expand(
             -1, n_agents, -1,
         ).reshape(batch, -1)
         joint_a = a.reshape(batch, -1)
-        q = critic.get_values(joint_z, joint_a)
+        q = critic.get_values(joint_z, joint_a, task_emb)
         assert q.shape == (batch, 1)

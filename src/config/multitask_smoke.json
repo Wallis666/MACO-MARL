@@ -1,22 +1,25 @@
 {
     "algo": {
-        "batch_size": 4096,
-        "buffer_size": 1000000,
+        "batch_size": 64,
+        "buffer_size": 2000,
         "gamma": 0.995,
         "n_step": 20,
         "polyak": 0.01,
         "policy_freq": 1,
         "fixed_order": false,
-        "entropy_coef": 1e-4,
+        "entropy_coef": 0.0001,
         "grad_clip": 20.0,
-        "lr": 3e-4,
+        "lr": 0.0003,
         "enc_lr_scale": 0.3,
         "update_per_train": 4,
         "train_interval": 2
     },
     "world_model": {
         "latent_dim": 128,
-        "hidden_dims": [512, 512],
+        "hidden_dims": [
+            512,
+            512
+        ],
         "num_bins": 101,
         "reward_min": -10,
         "reward_max": 10,
@@ -39,29 +42,38 @@
         "temperature": 0.5
     },
     "train": {
-        "n_rollout_threads": 16,
-        "num_env_steps": 1000000,
-        "warmup_steps": 5000,
+        "n_rollout_threads": 4,
+        "num_env_steps": 200,
+        "warmup_steps": 100,
         "warmup_train": true,
-        "warmup_train_steps": 2500,
-        "log_interval": 250,
+        "warmup_train_steps": 5,
+        "log_interval": 50,
         "eval_interval": 10000,
-        "save_interval": 10000,
+        "save_interval": 99999,
         "use_linear_lr_decay": false
     },
     "actor": {
-        "hidden_sizes": [128, 128],
+        "hidden_sizes": [
+            128,
+            128
+        ],
         "log_std_min": -10,
         "log_std_max": 2,
-        "lr": 3e-4
+        "lr": 0.0003
     },
     "critic": {
-        "hidden_sizes": [512, 512],
+        "hidden_sizes": [
+            512,
+            512
+        ],
         "scale_tau": 0.01
     },
     "env": {
         "mode": "multitask",
-        "tasks": ["cheetah_run", "cheetah_run_backwards"],
+        "tasks": [
+            "cheetah_run",
+            "cheetah_run_backwards"
+        ],
         "episode_limit": 1000
     }
 }

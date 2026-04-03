@@ -576,7 +576,7 @@ def _mt_worker_fn(
 ) -> None:
     """多任务子进程工作函数。
 
-    观测前拼接 one-hot 任务编码。
+    返回原始观测（不做 one-hot 拼接），任务信息通过 task_idx 传递。
 
     :param remote: 通信管道
     :param scenario: 机器人名称
@@ -585,7 +585,7 @@ def _mt_worker_fn(
     :param seed: 随机种子
     :param reward_fn: 自定义奖励函数
     :param task_idx: 本 worker 的任务索引
-    :param n_tasks: 总任务数
+    :param n_tasks: 总任务数（保留参数以兼容接口）
     """
     env = MAMuJoCoEnv(
         scenario=scenario,
@@ -594,21 +594,6 @@ def _mt_worker_fn(
         seed=seed,
         reward_fn=reward_fn,
     )
-    onehot = np.zeros(n_tasks, dtype=np.float32)
-    onehot[task_idx] = 1.0
-
-    def _augment_obs(
-        obs_list: list[np.ndarray],
-        share_obs: np.ndarray,
-    ) -> tuple[list[np.ndarray], np.ndarray]:
-        """观测前拼接 one-hot 任务编码。"""
-        aug_obs = [
-            np.concatenate([onehot, obs]) for obs in obs_list
-        ]
-        aug_share = np.concatenate(
-            [onehot] + [np.concatenate([onehot, obs]) for obs in obs_list],
-        )
-        return aug_obs, aug_share
 
     while True:
         cmd, data = remote.recv()
@@ -617,22 +602,15 @@ def _mt_worker_fn(
             done = term or trunc
             if done:
                 new_obs, new_share = env.reset()
-                info["terminal_obs"] = [
-                    np.concatenate([onehot, o]) for o in obs
-                ]
-                info["terminal_share_obs"] = np.concatenate(
-                    [onehot] + [np.concatenate([onehot, o]) for o in obs],
-                )
-                obs, share_obs = _augment_obs(new_obs, new_share)
-            else:
-                obs, share_obs = _augment_obs(obs, share_obs)
+                info["terminal_obs"] = list(obs)
+                info["terminal_share_obs"] = share_obs
+                obs, share_obs = new_obs, new_share
             remote.send((
                 obs, share_obs, rewards.mean(),
                 done, trunc and not term, info,
             ))
         elif cmd == "reset":
             obs, share_obs = env.reset()
-            obs, share_obs = _augment_obs(obs, share_obs)
             remote.send((obs, share_obs))
         elif cmd == "get_spaces":
             remote.send((
@@ -655,7 +633,7 @@ class MultiTaskVectorMAMuJoCoEnv:
     """多任务多进程向量化 MA-MuJoCo 环境。
 
     每个 worker 绑定一个任务（含自定义 reward_fn），
-    观测前拼接 one-hot 任务编码。
+    返回原始观测，任务信息通过 task_idxes 属性获取。
 
     :param n_envs: 并行环境数量，须能被 n_tasks 整除
     :param tasks: TaskDef 列表
@@ -704,20 +682,18 @@ class MultiTaskVectorMAMuJoCoEnv:
         # 获取空间信息（从第一个 worker）
         self.remotes[0].send(("get_spaces", None))
         spaces = self.remotes[0].recv()
-        raw_obs_dims = spaces[3]
         self.n_agents = spaces[2]
         self.act_spaces = spaces[1]
         self.act_dims = spaces[4]
 
-        # 增强后的维度：每个 agent obs += n_tasks
-        self.obs_dims = [d + self.n_tasks for d in raw_obs_dims]
-        # share_obs = one_hot + concat(augmented agent obs)
-        self.share_obs_dim = self.n_tasks + sum(self.obs_dims)
+        # 使用原始观测维度（任务信息通过嵌入注入，不再拼接 one-hot）
+        self.obs_dims = list(spaces[3])
+        self.share_obs_dim = spaces[5]
 
     def reset(self) -> tuple[list[list[np.ndarray]], np.ndarray]:
         """重置所有环境。
 
-        :return: (obs, share_obs)，观测已包含 one-hot 任务编码
+        :return: (obs, share_obs)
         """
         for remote in self.remotes:
             remote.send(("reset", None))
@@ -796,6 +772,7 @@ class MultiTaskVectorMAMuJoCoEnvDebug:
     """多任务串行向量化环境（调试用）。
 
     功能与 MultiTaskVectorMAMuJoCoEnv 相同，但在主进程串行执行。
+    返回原始观测，任务信息通过 task_idxes 属性获取。
 
     :param n_envs: 环境数量，须能被 n_tasks 整除
     :param tasks: TaskDef 列表
@@ -820,7 +797,6 @@ class MultiTaskVectorMAMuJoCoEnvDebug:
         ).repeat(n_envs // self.n_tasks)
 
         self.envs: list[MAMuJoCoEnv] = []
-        self._onehots: list[np.ndarray] = []
         for i in range(n_envs):
             task_idx = int(self.task_idxes[i])
             task = tasks[task_idx]
@@ -832,34 +808,13 @@ class MultiTaskVectorMAMuJoCoEnvDebug:
                 reward_fn=task.reward_fn,
             )
             self.envs.append(env)
-            oh = np.zeros(self.n_tasks, dtype=np.float32)
-            oh[task_idx] = 1.0
-            self._onehots.append(oh)
 
         self.n_agents = self.envs[0].n_agents
         self.act_spaces = self.envs[0].act_spaces
         self.act_dims = self.envs[0].act_dims
-        raw_obs_dims = self.envs[0].obs_dims
-        self.obs_dims = [d + self.n_tasks for d in raw_obs_dims]
-        self.share_obs_dim = self.n_tasks + sum(self.obs_dims)
-
-    def _augment_obs(
-        self,
-        obs_list: list[np.ndarray],
-        share_obs: np.ndarray,
-        env_idx: int,
-    ) -> tuple[list[np.ndarray], np.ndarray]:
-        """观测前拼接 one-hot 任务编码。
-
-        :param obs_list: 原始 per-agent 观测
-        :param share_obs: 原始全局观测
-        :param env_idx: 环境索引
-        :return: (augmented_obs, augmented_share_obs)
-        """
-        oh = self._onehots[env_idx]
-        aug_obs = [np.concatenate([oh, obs]) for obs in obs_list]
-        aug_share = np.concatenate([oh] + aug_obs)
-        return aug_obs, aug_share
+        # 使用原始观测维度（任务信息通过嵌入注入，不再拼接 one-hot）
+        self.obs_dims = list(self.envs[0].obs_dims)
+        self.share_obs_dim = self.envs[0].share_obs_dim
 
     def reset(self) -> tuple[list[list[np.ndarray]], np.ndarray]:
         """重置所有环境。
@@ -868,9 +823,8 @@ class MultiTaskVectorMAMuJoCoEnvDebug:
         """
         all_obs = []
         all_share = []
-        for i, env in enumerate(self.envs):
+        for env in self.envs:
             obs, share_obs = env.reset()
-            obs, share_obs = self._augment_obs(obs, share_obs, i)
             all_obs.append(obs)
             all_share.append(share_obs)
         return all_obs, np.stack(all_share)
@@ -906,16 +860,9 @@ class MultiTaskVectorMAMuJoCoEnvDebug:
 
             if done:
                 new_obs, new_share = env.reset()
-                info["terminal_obs"] = [
-                    np.concatenate([self._onehots[i], o]) for o in obs
-                ]
-                info["terminal_share_obs"] = np.concatenate(
-                    [self._onehots[i]]
-                    + [np.concatenate([self._onehots[i], o]) for o in obs],
-                )
-                obs, share_obs = self._augment_obs(new_obs, new_share, i)
-            else:
-                obs, share_obs = self._augment_obs(obs, share_obs, i)
+                info["terminal_obs"] = list(obs)
+                info["terminal_share_obs"] = share_obs
+                obs, share_obs = new_obs, new_share
 
             all_obs.append(obs)
             all_share.append(share_obs)

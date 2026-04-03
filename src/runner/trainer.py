@@ -2,6 +2,7 @@
 
 整合环境、世界模型、Actor/Critic、Buffer 和 MPPI 规划器，
 完成 warmup -> rollout -> model_train -> actor_train 的完整流程。
+多任务模式下通过可学习任务嵌入实现任务条件化。
 """
 import json
 import os
@@ -28,6 +29,7 @@ from src.envs.mamujoco import (
 from src.models.dynamics import DenseDynamics
 from src.models.encoder import MLPEncoder
 from src.models.reward import DenseReward
+from src.models.task_embedding import TaskEmbeddingTable
 from src.models.utils import TwoHotProcessor
 
 
@@ -114,17 +116,30 @@ class Trainer:
         self.share_obs_dim = self.envs.share_obs_dim
 
     def _init_models(self) -> None:
-        """初始化世界模型组件、Actor 和 Critic。"""
+        """初始化世界模型组件、Actor、Critic 和任务嵌入。"""
         wm_cfg = self.config["world_model"]
         algo_cfg = self.config["algo"]
         actor_cfg = self.config["actor"]
         critic_cfg = self.config["critic"]
         latent_dim = wm_cfg["latent_dim"]
 
+        # 任务嵌入维度：多任务使用配置值，单任务为 0
+        self.task_dim = wm_cfg.get("task_dim", 0) if self.multitask else 0
+
+        # 任务嵌入表（仅多任务模式）
+        if self.task_dim > 0:
+            self.task_embedding = TaskEmbeddingTable(
+                n_tasks=self.n_tasks,
+                task_dim=self.task_dim,
+            ).to(self.device)
+        else:
+            self.task_embedding = None
+
         self.encoders = [
             MLPEncoder(
                 obs_dim=self.obs_dims[i],
                 latent_dim=latent_dim,
+                task_dim=self.task_dim,
                 hidden_dims=wm_cfg["hidden_dims"],
                 simnorm_dim=wm_cfg["simnorm_dim"],
                 device=self.device,
@@ -136,6 +151,7 @@ class Trainer:
             latent_dim=latent_dim,
             action_dim=self.act_dims[0],
             n_agents=self.n_agents,
+            task_dim=self.task_dim,
             hidden_dims=wm_cfg["hidden_dims"],
             simnorm_dim=wm_cfg["simnorm_dim"],
             device=self.device,
@@ -145,6 +161,7 @@ class Trainer:
             latent_dim=latent_dim,
             action_dim=self.act_dims[0],
             n_agents=self.n_agents,
+            task_dim=self.task_dim,
             num_bins=wm_cfg["num_bins"],
             hidden_dims=wm_cfg["hidden_dims"],
             device=self.device,
@@ -161,6 +178,7 @@ class Trainer:
             WorldModelActor(
                 latent_dim=latent_dim,
                 action_dim=self.act_dims[i],
+                task_dim=self.task_dim,
                 hidden_sizes=actor_cfg["hidden_sizes"],
                 lr=actor_cfg["lr"],
                 log_std_min=actor_cfg["log_std_min"],
@@ -174,6 +192,7 @@ class Trainer:
         self.critic = WorldModelCritic(
             joint_latent_dim=latent_dim * self.n_agents,
             joint_action_dim=total_act_dim,
+            task_dim=self.task_dim,
             num_bins=wm_cfg["num_bins"],
             reward_min=wm_cfg["reward_min"],
             reward_max=wm_cfg["reward_max"],
@@ -219,7 +238,7 @@ class Trainer:
         )
 
     def _init_optimizer(self) -> None:
-        """初始化统一优化器（Encoder + Dynamics + Reward + Critic）。"""
+        """初始化统一优化器（Encoder + Dynamics + Reward + Critic + TaskEmb）。"""
         algo_cfg = self.config["algo"]
         lr = algo_cfg["lr"]
         enc_lr = lr * algo_cfg["enc_lr_scale"]
@@ -238,7 +257,27 @@ class Trainer:
         param_groups.append(
             {"params": self.critic.parameters(), "lr": lr},
         )
+        if self.task_embedding is not None:
+            param_groups.append(
+                {"params": self.task_embedding.parameters(), "lr": lr},
+            )
         self.optimizer = torch.optim.Adam(param_groups, lr=lr)
+
+    def _get_task_emb(
+        self,
+        task_indices: np.ndarray,
+    ) -> torch.Tensor | None:
+        """从任务索引获取任务嵌入向量。
+
+        :param task_indices: 任务索引数组，形状 (batch,)
+        :return: 任务嵌入 (batch, task_dim) 或 None（单任务模式）
+        """
+        if self.task_embedding is None:
+            return None
+        task_ids = torch.as_tensor(
+            task_indices, dtype=torch.long, device=self.device,
+        )
+        return self.task_embedding(task_ids)
 
     def run(self) -> None:
         """主训练循环。"""
@@ -444,6 +483,8 @@ class Trainer:
         :param t0: episode 开始标志
         :return: 各智能体动作列表
         """
+        task_emb = self._get_task_emb(self.task_idxes)
+
         zs = []
         for i in range(self.n_agents):
             obs_i = np.stack(
@@ -453,7 +494,7 @@ class Trainer:
             obs_t = torch.as_tensor(
                 obs_i, dtype=torch.float32, device=self.device,
             )
-            z_i = self.encoders[i].encode(obs_t)
+            z_i = self.encoders[i].encode(obs_t, task_emb)
             zs.append(z_i)
 
         return self.planner.plan(
@@ -464,6 +505,7 @@ class Trainer:
             reward_processor=self.reward_processor,
             actors=self.actors,
             critic=self.critic,
+            task_emb=task_emb,
         )
 
     @torch.no_grad()
@@ -476,6 +518,8 @@ class Trainer:
         :param obs_list: 当前观测
         :return: 各智能体动作列表，每项 (n_threads, act_dim)
         """
+        task_emb = self._get_task_emb(self.task_idxes)
+
         actions = []
         for i in range(self.n_agents):
             obs_i = np.stack(
@@ -485,8 +529,8 @@ class Trainer:
             obs_t = torch.as_tensor(
                 obs_i, dtype=torch.float32, device=self.device,
             )
-            z_i = self.encoders[i].encode(obs_t)
-            a_i = self.actors[i].get_actions(z_i, stochastic=True)
+            z_i = self.encoders[i].encode(obs_t, task_emb)
+            a_i = self.actors[i].get_actions(z_i, task_emb, stochastic=True)
             actions.append(a_i)
         return actions
 
@@ -552,6 +596,7 @@ class Trainer:
             valid=valid,
             next_share_obs=next_share_obs,
             next_obs=next_obs_per_agent,
+            task_idx=self.task_idxes,
         )
 
     def _model_train(self) -> dict[str, float]:
@@ -565,6 +610,10 @@ class Trainer:
 
         batch = self.buffer.sample_horizon(horizon)
         nstep_batch = self.buffer.sample()
+
+        # 获取任务嵌入
+        h_task_emb = self._get_task_emb(batch["task_idx"])
+        n_task_emb = self._get_task_emb(nstep_batch["task_idx"])
 
         obs_h = [
             torch.as_tensor(batch["obs"][i], dtype=torch.float32, device=self.device)
@@ -615,19 +664,19 @@ class Trainer:
 
         with torch.no_grad():
             nstep_next_zs = [
-                self.encoders[i].encode(nstep_next_obs[i])
+                self.encoders[i].encode(nstep_next_obs[i], n_task_emb)
                 for i in range(self.n_agents)
             ]
             joint_next_z = torch.cat(nstep_next_zs, dim=-1)
 
             next_actions = [
-                self.actors[i].get_actions(nstep_next_zs[i])
+                self.actors[i].get_actions(nstep_next_zs[i], n_task_emb)
                 for i in range(self.n_agents)
             ]
             joint_next_a = torch.cat(next_actions, dim=-1)
 
             q_target = self.critic.get_target_values(
-                joint_next_z, joint_next_a,
+                joint_next_z, joint_next_a, n_task_emb,
             )
             q_targets = (
                 nstep_reward
@@ -638,7 +687,7 @@ class Trainer:
         reward_loss = torch.tensor(0.0, device=self.device)
 
         zs = [
-            self.encoders[i].encode(obs_h[i][0])
+            self.encoders[i].encode(obs_h[i][0], h_task_emb)
             for i in range(self.n_agents)
         ]
 
@@ -650,12 +699,12 @@ class Trainer:
                 [actions_h[i][t] for i in range(self.n_agents)], dim=1,
             )
 
-            z_pred = self.dynamics.predict(z_joint, a_joint)
-            r_logits = self.reward_model.predict(z_joint, a_joint)
+            z_pred = self.dynamics.predict(z_joint, a_joint, h_task_emb)
+            r_logits = self.reward_model.predict(z_joint, a_joint, h_task_emb)
 
             with torch.no_grad():
                 z_true = [
-                    self.encoders[i].encode(next_obs_h[i][t])
+                    self.encoders[i].encode(next_obs_h[i][t], h_task_emb)
                     for i in range(self.n_agents)
                 ]
                 z_true_joint = torch.stack(z_true, dim=1)
@@ -679,14 +728,14 @@ class Trainer:
         reward_loss = reward_loss / horizon
 
         batch_z = [
-            self.encoders[i].encode(batch_obs[i])
+            self.encoders[i].encode(batch_obs[i], n_task_emb)
             for i in range(self.n_agents)
         ]
         joint_z = torch.cat(batch_z, dim=-1)
         joint_a = torch.cat(batch_actions, dim=-1)
 
-        q1_logits = self.critic.critic(joint_z, joint_a)
-        q2_logits = self.critic.critic2(joint_z, joint_a)
+        q1_logits = self.critic.critic(joint_z, joint_a, n_task_emb)
+        q2_logits = self.critic.critic2(joint_z, joint_a, n_task_emb)
         q_loss = (
             self.critic.processor.loss(q1_logits, q_targets).mean()
             + self.critic.processor.loss(q2_logits, q_targets).mean()
@@ -708,6 +757,7 @@ class Trainer:
         self.optimizer.step()
 
         self._actor_zs = all_zs_for_actor
+        self._actor_task_emb = h_task_emb
 
         return {
             "dynamics_loss": dynamics_loss.item(),
@@ -730,6 +780,10 @@ class Trainer:
             return {}
 
         zs_list = self._actor_zs
+        task_emb = self._actor_task_emb
+        # 对 actor 训练时 task_emb 不回传梯度
+        if task_emb is not None:
+            task_emb = task_emb.detach()
 
         agent_order = np.random.permutation(self.n_agents)
         if algo_cfg["fixed_order"]:
@@ -741,7 +795,7 @@ class Trainer:
         for i in range(self.n_agents):
             with torch.no_grad():
                 a, _ = self.actors[i].policy(
-                    zs_list[i][0], stochastic=True,
+                    zs_list[i][0], task_emb, stochastic=True,
                 )
                 current_actions[i] = a
 
@@ -752,7 +806,7 @@ class Trainer:
             for t in range(len(zs_list[agent_idx])):
                 action, log_prob = self.actors[
                     agent_idx
-                ].get_actions_with_logprobs(zs_list[agent_idx][t])
+                ].get_actions_with_logprobs(zs_list[agent_idx][t], task_emb)
                 current_actions[agent_idx] = action
 
                 joint_z = torch.cat(
@@ -762,7 +816,7 @@ class Trainer:
                 joint_a = torch.cat(current_actions, dim=-1)
 
                 q_value = self.critic.get_values(
-                    joint_z, joint_a, mode="mean",
+                    joint_z, joint_a, task_emb, mode="mean",
                 )
 
                 rho_t = step_rho ** t
@@ -783,7 +837,7 @@ class Trainer:
 
             with torch.no_grad():
                 a, _ = self.actors[agent_idx].policy(
-                    zs_list[agent_idx][0], stochastic=True,
+                    zs_list[agent_idx][0], task_emb, stochastic=True,
                 )
                 current_actions[agent_idx] = a
 
@@ -874,5 +928,7 @@ class Trainer:
             "target_critic2": self.critic.target_critic2.state_dict(),
             "optimizer": self.optimizer.state_dict(),
         }
+        if self.task_embedding is not None:
+            state["task_embedding"] = self.task_embedding.state_dict()
         torch.save(state, path)
         print(f"  模型已保存至 {path}")

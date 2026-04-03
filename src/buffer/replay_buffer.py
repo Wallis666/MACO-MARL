@@ -71,6 +71,7 @@ class ReplayBuffer:
             np.ones((buffer_size, 1), dtype=np.float32)
             for _ in range(n_agents)
         ]
+        self.task_idx = np.zeros(buffer_size, dtype=np.int32)
         self.end_flag = np.zeros(buffer_size, dtype=np.float32)
 
         self.idx = 0
@@ -92,6 +93,7 @@ class ReplayBuffer:
         valid: list[np.ndarray],
         next_share_obs: np.ndarray,
         next_obs: list[np.ndarray],
+        task_idx: np.ndarray | None = None,
     ) -> None:
         """插入一步 transition（来自多个并行环境）。
 
@@ -104,6 +106,7 @@ class ReplayBuffer:
         :param valid: 有效 transition 标志，列表中每项 (n_threads, 1)
         :param next_share_obs: 下一步全局观测
         :param next_obs: 下一步各智能体观测
+        :param task_idx: 每个环境的任务索引，形状 (n_threads,) 或 None
         """
         length = share_obs.shape[0]
         indices = np.arange(self.idx, self.idx + length) % self.buffer_size
@@ -113,6 +116,9 @@ class ReplayBuffer:
         self.rewards[indices] = rewards
         self.dones[indices] = dones
         self.terms[indices] = terms
+
+        if task_idx is not None:
+            self.task_idx[indices] = task_idx
 
         for i in range(self.n_agents):
             self.obs[i][indices] = obs[i]
@@ -189,6 +195,7 @@ class ReplayBuffer:
             "next_obs": [
                 self.next_obs[i][indices] for i in range(self.n_agents)
             ],
+            "task_idx": self.task_idx[indices],
         }
 
     def sample_horizon(
@@ -236,6 +243,7 @@ class ReplayBuffer:
             "actions": h_actions,
             "next_obs": h_next_obs,
             "rewards": h_rewards,
+            "task_idx": self.task_idx[t0],
         }
 
     def can_sample(self) -> bool:

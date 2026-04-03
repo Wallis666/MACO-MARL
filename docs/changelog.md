@@ -15,6 +15,11 @@
 
 <!-- 新记录插入到此行下方，最新的在最上面 -->
 
+### 20260403-220000
+- **类型**: feat
+- **涉及文件**: `src/models/task_embedding.py`（新建）, `src/models/encoder.py`, `src/models/dynamics.py`, `src/models/reward.py`, `src/algorithms/actor.py`, `src/algorithms/critic.py`, `src/algorithms/planner.py`, `src/buffer/replay_buffer.py`, `src/envs/mamujoco.py`, `src/runner/trainer.py`, `src/config/multitask.json`, `tests/test_shapes.py`, `tests/test_multitask.py`
+- **摘要**: 阶段 2 — 任务条件化世界模型。参考 TD-MPC2，实现可学习任务嵌入（`nn.Embedding` + `max_norm=1`）通过拼接（concatenation）注入所有模型组件（Encoder/Dynamics/Reward/Actor/Critic/Planner）。去掉环境层 one-hot 观测拼接，改为模型层嵌入拼接。Buffer 新增 `task_idx` 存储。Trainer 集成 TaskEmbeddingTable，训练时查表获取嵌入传递给所有组件。`multitask.json` 新增 `task_dim=32`。单任务模式向后兼容（`task_dim=0` 时跳过拼接）。55 个测试全部通过。
+
 ### 20260403-180000
 - **类型**: docs
 - **涉及文件**: `CLAUDE.md`, `docs/requirements.md`, `docs/changelog.md`

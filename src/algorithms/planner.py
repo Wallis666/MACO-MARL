@@ -2,6 +2,7 @@
 
 基于 CEM（Cross-Entropy Method）的模型预测路径积分规划，
 在世界模型的潜在空间中搜索最优动作序列。
+多任务模式下传递任务嵌入到各模型组件。
 """
 import torch
 import torch.nn.functional as F
@@ -72,6 +73,7 @@ class MPPIPlanner:
         reward_processor: object,
         actors: list[object],
         critic: object,
+        task_emb: torch.Tensor | None = None,
     ) -> list[torch.Tensor]:
         """执行 MPPI 规划。
 
@@ -82,6 +84,7 @@ class MPPIPlanner:
         :param reward_processor: TwoHot 编解码器
         :param actors: Actor 列表
         :param critic: Critic
+        :param task_emb: 任务嵌入，形状 (n_threads, task_dim) 或 None
         :return: 各智能体的动作列表，每项 (n_threads, act_dim)
         """
         n_threads = zs[0].shape[0]
@@ -113,7 +116,7 @@ class MPPIPlanner:
         pi_actions = None
         if self.num_pi_trajs > 0:
             pi_actions = self._generate_pi_trajs(
-                zs, dynamics_model, actors,
+                zs, dynamics_model, actors, task_emb,
             )
 
         actions = [
@@ -156,7 +159,7 @@ class MPPIPlanner:
 
             g_returns = self._estimate_value(
                 zs, actions, dynamics_model, reward_model,
-                reward_processor, actors, critic,
+                reward_processor, actors, critic, task_emb,
             )
 
             for i in range(self.n_agents):
@@ -208,12 +211,14 @@ class MPPIPlanner:
         zs: list[torch.Tensor],
         dynamics_model: torch.nn.Module,
         actors: list[object],
+        task_emb: torch.Tensor | None = None,
     ) -> list[torch.Tensor]:
         """用当前策略生成轨迹样本。
 
         :param zs: 各智能体当前潜在状态
         :param dynamics_model: 动力学模型
         :param actors: Actor 列表
+        :param task_emb: 任务嵌入，形状 (n_threads, task_dim) 或 None
         :return: 策略动作序列
         """
         n_threads = zs[0].shape[0]
@@ -233,10 +238,20 @@ class MPPIPlanner:
             for z in zs
         ]
 
+        # 扩展 task_emb 以匹配 (n_threads * num_pi_trajs, task_dim)
+        if task_emb is not None:
+            te_expanded = task_emb.unsqueeze(1).expand(
+                -1, self.num_pi_trajs, -1,
+            ).reshape(-1, task_emb.shape[-1])
+        else:
+            te_expanded = None
+
         for t in range(self.horizon):
             for i in range(self.n_agents):
                 z_flat = cur_zs[i].reshape(-1, self.latent_dim)
-                a_flat = actors[i].get_actions(z_flat, stochastic=True)
+                a_flat = actors[i].get_actions(
+                    z_flat, te_expanded, stochastic=True,
+                )
                 pi_actions[i][t] = a_flat.reshape(
                     n_threads, self.num_pi_trajs, self.act_dims[i],
                 )
@@ -253,7 +268,7 @@ class MPPIPlanner:
                 batch = n_threads * self.num_pi_trajs
                 z_in = z_joint.reshape(batch, self.n_agents, -1)
                 a_in = a_joint.reshape(batch, self.n_agents, -1)
-                z_next = dynamics_model.predict(z_in, a_in)
+                z_next = dynamics_model.predict(z_in, a_in, te_expanded)
                 for i in range(self.n_agents):
                     cur_zs[i] = z_next[:, i].reshape(
                         n_threads, self.num_pi_trajs, -1,
@@ -270,6 +285,7 @@ class MPPIPlanner:
         reward_processor: object,
         actors: list[object],
         critic: object,
+        task_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """估计动作序列的累计回报。
 
@@ -280,6 +296,7 @@ class MPPIPlanner:
         :param reward_processor: TwoHot 编解码器
         :param actors: Actor 列表
         :param critic: Critic
+        :param task_emb: 任务嵌入，形状 (n_threads, task_dim) 或 None
         :return: 累计回报，形状 (n_threads, num_samples, 1)
         """
         n_threads = zs[0].shape[0]
@@ -289,6 +306,14 @@ class MPPIPlanner:
             z.unsqueeze(1).expand(-1, num_samples, -1)
             for z in zs
         ]
+
+        # 扩展 task_emb 以匹配 (n_threads * num_samples, task_dim)
+        if task_emb is not None:
+            te_expanded = task_emb.unsqueeze(1).expand(
+                -1, num_samples, -1,
+            ).reshape(-1, task_emb.shape[-1])
+        else:
+            te_expanded = None
 
         g_returns = torch.zeros(
             n_threads, num_samples, 1, device=self.device,
@@ -304,13 +329,13 @@ class MPPIPlanner:
             z_in = z_joint.reshape(batch, self.n_agents, -1)
             a_in = a_joint.reshape(batch, self.n_agents, -1)
 
-            r_logits = reward_model.predict(z_in, a_in)
+            r_logits = reward_model.predict(z_in, a_in, te_expanded)
             r_value = reward_processor.logits_to_scalar(r_logits)
             r_value = r_value.reshape(n_threads, num_samples, 1)
 
             g_returns = g_returns + (self.gamma ** t) * r_value
 
-            z_next = dynamics_model.predict(z_in, a_in)
+            z_next = dynamics_model.predict(z_in, a_in, te_expanded)
             for i in range(self.n_agents):
                 cur_zs[i] = z_next[:, i].reshape(
                     n_threads, num_samples, -1,
@@ -322,11 +347,15 @@ class MPPIPlanner:
         joint_a_list = []
         for i in range(self.n_agents):
             z_flat = cur_zs[i].reshape(batch, -1)
-            a_flat = actors[i].get_actions(z_flat, stochastic=True)
+            a_flat = actors[i].get_actions(
+                z_flat, te_expanded, stochastic=True,
+            )
             joint_a_list.append(a_flat)
         joint_a = torch.cat(joint_a_list, dim=-1)
 
-        horizon_q = critic.get_target_values(joint_z, joint_a)
+        horizon_q = critic.get_target_values(
+            joint_z, joint_a, te_expanded,
+        )
         horizon_q = horizon_q.reshape(n_threads, num_samples, 1)
 
         g_returns = g_returns + (self.gamma ** self.horizon) * horizon_q
