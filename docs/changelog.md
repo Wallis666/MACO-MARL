@@ -15,6 +15,11 @@
 
 <!-- 新记录插入到此行下方，最新的在最上面 -->
 
+### 20260403-180000
+- **类型**: docs
+- **涉及文件**: `CLAUDE.md`, `docs/requirements.md`, `docs/changelog.md`
+- **摘要**: 新增 TD-MPC2 参考代码库（`references/tdmpc2/`，ICLR 2024 可扩展多任务世界模型）和对应论文。所有 PDF 迁移至 `pdfs/` 目录，更新论文路径。更新参考代码库列表和关键路径（world_model.py、layers.py、multitask.py 等）。
+
 ### 20260403-160000
 - **类型**: docs
 - **涉及文件**: `CLAUDE.md`, `docs/requirements.md`, `docs/changelog.md`

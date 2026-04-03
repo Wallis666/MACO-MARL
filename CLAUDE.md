@@ -4,10 +4,11 @@
 
 本科毕设项目。构建一个**基于世界模型的多任务多智能体强化学习（MT-MARL）框架，支持 few-shot 快速适应**。核心目标：在多个已知任务上联合训练后，仅凭几条新任务的演示轨迹（无需梯度更新）即可适应未见过的新任务。
 
-本项目参考四个代码库：
+本项目参考五个代码库：
 - **DIMA**（`references/DIMA/`）：基于扩散模型的多智能体世界模型（NeurIPS 2025）
 - **M3W-MARL**（`references/m3w-marl/`）：基于 MoE 的多任务世界模型（NeurIPS 2025）— 参考世界模型架构和训练流程
 - **HiSSD**（`references/HiSSD/`）：分层可分离技能发现的离线多任务 MARL（ICLR 2025）— 参考技能分解与多任务迁移
+- **TD-MPC2**（`references/tdmpc2/`）：可扩展的多任务世界模型（ICLR 2024）— 主要参考，任务嵌入 + Dense 多任务架构
 - **dm_control**（`references/dm_control/`）：DeepMind Control Suite — 参考任务定义和奖励设计
 
 目标环境：**MA-MuJoCo**（多智能体 MuJoCo）。
@@ -59,9 +60,10 @@
 
 | 文件 | 说明 |
 |------|------|
-| `DIMA.pdf` | DIMA 论文 — 基于扩散模型的多智能体世界模型（NeurIPS 2025） |
-| `M3W-MARL.pdf` | M3W 论文 — 基于 MoE 的多任务世界模型（NeurIPS 2025） |
-| `HiSSD.pdf` | HiSSD 论文 — 分层可分离技能发现的离线多任务 MARL（ICLR 2025） |
+| `pdfs/DIMA.pdf` | DIMA 论文 — 基于扩散模型的多智能体世界模型（NeurIPS 2025） |
+| `pdfs/M3W-MARL.pdf` | M3W 论文 — 基于 MoE 的多任务世界模型（NeurIPS 2025） |
+| `pdfs/HiSSD.pdf` | HiSSD 论文 — 分层可分离技能发现的离线多任务 MARL（ICLR 2025） |
+| `pdfs/TD-MPC2.pdf` | TD-MPC2 论文 — 可扩展的多任务世界模型（ICLR 2024） |
 
 ### 参考代码库关键路径
 
@@ -89,6 +91,15 @@
 - `src/learners/multi_task/hissd_learner.py` — HiSSD 学习器
 - `src/controllers/multi_task/mt_hissd_controller.py` — 多任务控制器
 - `src/runners/multi_task/episode_ada_runner.py` — 适应阶段 Runner
+
+**TD-MPC2**（`references/tdmpc2/`，只读）：
+- `tdmpc2/train.py` — 训练入口
+- `tdmpc2/tdmpc2.py` — 核心算法（MPPI 规划、模型更新）
+- `tdmpc2/common/world_model.py` — 世界模型（可学习任务嵌入、Encoder、Dynamics、Reward、Policy）
+- `tdmpc2/common/layers.py` — 网络层（SimNorm、NormedLinear 等）
+- `tdmpc2/common/scale.py` — RunningScale（Q 值自适应缩放）
+- `tdmpc2/trainer/online_trainer.py` — 在线训练循环
+- `tdmpc2/envs/wrappers/multitask.py` — 多任务环境封装
 
 **dm_control**（`references/dm_control/`，只读）：
 - `dm_control/suite/` — 各类 MuJoCo 任务定义
@@ -174,7 +185,7 @@ conda run -n maco pip install <包名>
 3. **当前阶段**：参见上方路线图表格中的最新状态
 4. **上次失败经验**：多任务训练收敛到理想值的不到 10% — 大概率是工程问题（奖励尺度、观测对齐），而非算法问题
 5. **开发策略**：Dense + 任务条件化（FiLM）→ 上下文编码器 → few-shot 适应
-6. **参考代码库只读**：`references/` 下的 DIMA、m3w-marl、HiSSD、dm_control 不得修改
+6. **参考代码库只读**：`references/` 下的 DIMA、m3w-marl、HiSSD、tdmpc2、dm_control 不得修改
 7. **目标环境**：MA-MuJoCo（连续动作空间，多智能体）
 
 ### 技术决策
@@ -192,6 +203,6 @@ conda run -n maco pip install <包名>
 
 ### 文件位置
 - 项目根目录：`C:\Users\11242\Desktop\temp`
-- 参考代码库：`C:\Users\11242\Desktop\temp\references\`（DIMA、m3w-marl、HiSSD、dm_control）
-- 论文文件：项目根目录下的 `DIMA.pdf`、`M3W-MARL.pdf` 和 `HiSSD.pdf`
+- 参考代码库：`C:\Users\11242\Desktop\temp\references\`（DIMA、m3w-marl、HiSSD、tdmpc2、dm_control）
+- 论文文件：`C:\Users\11242\Desktop\temp\pdfs\`（DIMA.pdf、M3W-MARL.pdf、HiSSD.pdf、TD-MPC2.pdf）
 - 项目文档：`C:\Users\11242\Desktop\temp\docs\`

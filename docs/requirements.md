@@ -73,6 +73,7 @@
 | DIMA | `references/DIMA/` | 基于扩散模型的多智能体世界模型（NeurIPS 2025） |
 | M3W-MARL | `references/m3w-marl/` | 基于 MoE 的多任务世界模型（NeurIPS 2025），参考世界模型架构和训练流程 |
 | HiSSD | `references/HiSSD/` | 分层可分离技能发现的离线多任务 MARL（ICLR 2025），参考技能分解与多任务迁移 |
+| TD-MPC2 | `references/tdmpc2/` | 可扩展的多任务世界模型（ICLR 2024），主要参考：任务嵌入 + Dense 多任务架构 + MPPI 规划 |
 | dm_control | `references/dm_control/` | DeepMind Control Suite，参考任务定义和奖励设计 |
 
 ## 6. 评估指标
@@ -88,7 +89,7 @@
 ## 7. 约束
 
 - 目标环境仅限连续动作空间（受 MPPI 规划器限制）。
-- 参考代码库（`references/` 下，含 DIMA、M3W-MARL、HiSSD、dm_control）只读，不得修改。
+- 参考代码库（`references/` 下，含 DIMA、M3W-MARL、HiSSD、TD-MPC2、dm_control）只读，不得修改。
 - 所有 Python 命令在 `maco` conda 环境中执行。
 
 ## 8. 扩展性规划
