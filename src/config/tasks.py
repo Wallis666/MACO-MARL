@@ -117,6 +117,8 @@ def tolerance(
 
 _CHEETAH_RUN_SPEED = 10
 _CHEETAH_RUN_BACKWARDS_SPEED = 8
+_CHEETAH_RUN_SLOW_SPEED = 5
+_CHEETAH_WALK_SPEED = 2
 _CHEETAH_HEALTHY_HEIGHT = 0.6
 _CHEETAH_HEIGHT_MARGIN = 0.2
 
@@ -171,6 +173,56 @@ def cheetah_run_backwards(info: dict) -> float:
     return float(speed_reward * height_reward * upright_reward)
 
 
+def cheetah_run_slow(info: dict) -> float:
+    """HalfCheetah 慢速前进任务奖励（held-out 评估任务）。
+
+    目标速度 5 m/s，输出 [0, 1]。
+
+    :param info: 物理信息字典
+    :return: 归一化奖励
+    """
+    speed_reward = tolerance(
+        info["forward_velocity"],
+        bounds=(_CHEETAH_RUN_SLOW_SPEED, float("inf")),
+        margin=_CHEETAH_RUN_SLOW_SPEED,
+        sigmoid="linear",
+        value_at_margin=0,
+    )
+    height_reward = tolerance(
+        info["torso_z"],
+        bounds=(_CHEETAH_HEALTHY_HEIGHT, float("inf")),
+        margin=_CHEETAH_HEIGHT_MARGIN,
+        sigmoid="gaussian",
+    )
+    upright_reward = (1.0 + np.cos(info["rooty"])) / 2.0
+    return float(speed_reward * height_reward * upright_reward)
+
+
+def cheetah_walk(info: dict) -> float:
+    """HalfCheetah 行走任务奖励（held-out 评估任务）。
+
+    目标速度 2 m/s，输出 [0, 1]。
+
+    :param info: 物理信息字典
+    :return: 归一化奖励
+    """
+    speed_reward = tolerance(
+        info["forward_velocity"],
+        bounds=(_CHEETAH_WALK_SPEED, float("inf")),
+        margin=_CHEETAH_WALK_SPEED,
+        sigmoid="linear",
+        value_at_margin=0,
+    )
+    height_reward = tolerance(
+        info["torso_z"],
+        bounds=(_CHEETAH_HEALTHY_HEIGHT, float("inf")),
+        margin=_CHEETAH_HEIGHT_MARGIN,
+        sigmoid="gaussian",
+    )
+    upright_reward = (1.0 + np.cos(info["rooty"])) / 2.0
+    return float(speed_reward * height_reward * upright_reward)
+
+
 # ---------------------------------------------------------------------------
 # TaskDef 与注册表
 # ---------------------------------------------------------------------------
@@ -203,6 +255,18 @@ TASK_REGISTRY: dict[str, TaskDef] = {
         scenario="HalfCheetah",
         agent_conf="2x3",
         reward_fn=cheetah_run_backwards,
+    ),
+    "cheetah_run_slow": TaskDef(
+        name="cheetah_run_slow",
+        scenario="HalfCheetah",
+        agent_conf="2x3",
+        reward_fn=cheetah_run_slow,
+    ),
+    "cheetah_walk": TaskDef(
+        name="cheetah_walk",
+        scenario="HalfCheetah",
+        agent_conf="2x3",
+        reward_fn=cheetah_walk,
     ),
 }
 

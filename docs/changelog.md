@@ -15,6 +15,11 @@
 
 <!-- 新记录插入到此行下方，最新的在最上面 -->
 
+### 20260404-030000
+- **类型**: feat
+- **涉及文件**: `scripts/evaluate_fewshot.py`（新建）, `src/config/tasks.py`, `tests/test_evaluate_fewshot.py`（新建）
+- **摘要**: 阶段 4 — Few-shot 适应评估。新增 held-out 评估任务（`cheetah_run_slow` 5m/s、`cheetah_walk` 2m/s）。创建评估脚本支持 4 种模式：few-shot（随机 demo → 上下文编码器 → Actor 推理）、few-shot-mppi（MPPI 规划器）、oracle（训练任务嵌入查表，上限基线）、random（随机策略，下限基线）。输出含 per-episode 回报、demo 奖励统计、与训练任务嵌入的余弦相似度。72 个测试全部通过。
+
 ### 20260404-010000
 - **类型**: feat
 - **涉及文件**: `src/models/context_encoder.py`（新建）, `src/buffer/replay_buffer.py`, `src/runner/trainer.py`, `src/config/multitask.json`, `tests/test_context_encoder.py`（新建）
