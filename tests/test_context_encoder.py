@@ -309,5 +309,121 @@ class TestContextEncoderIntegration:
         assert q.shape == (batch, 1)
 
 
+# ---------------------------------------------------------------------------
+# 5. EMA 任务嵌入测试
+# ---------------------------------------------------------------------------
+
+class TestEMATaskEmbedding:
+    """EMA 任务嵌入目标稳定性测试。"""
+
+    def test_ema_tracks_live_slowly(self) -> None:
+        """EMA 嵌入缓慢跟踪在线嵌入，不会剧烈跳变。"""
+        import copy
+        from src.models.task_embedding import TaskEmbeddingTable
+
+        n_tasks = 2
+        tau = 0.005
+        table = TaskEmbeddingTable(n_tasks, TASK_DIM)
+        ema = copy.deepcopy(table)
+        for p in ema.parameters():
+            p.requires_grad_(False)
+
+        ema_before = ema._emb.weight.data.clone()
+
+        # 模拟在线表被梯度更新
+        with torch.no_grad():
+            table._emb.weight.data.add_(torch.randn_like(table._emb.weight))
+
+        # EMA 更新
+        with torch.no_grad():
+            for p, p_ema in zip(
+                table.parameters(), ema.parameters(),
+            ):
+                p_ema.lerp_(p.data, tau)
+
+        ema_after = ema._emb.weight.data
+        # EMA 应该只移动一小步
+        delta = (ema_after - ema_before).norm()
+        live_delta = (table._emb.weight.data - ema_before).norm()
+        assert delta < live_delta, (
+            f"EMA 移动量 {delta:.4f} 应远小于在线表变化量 {live_delta:.4f}"
+        )
+        assert delta > 0, "EMA 应有微小变化"
+
+    def test_ema_converges_after_many_steps(self) -> None:
+        """多步 EMA 更新后逐渐逼近在线嵌入。"""
+        import copy
+        from src.models.task_embedding import TaskEmbeddingTable
+
+        n_tasks = 2
+        tau = 0.005
+        table = TaskEmbeddingTable(n_tasks, TASK_DIM)
+        ema = copy.deepcopy(table)
+        for p in ema.parameters():
+            p.requires_grad_(False)
+
+        # 固定在线表不动，EMA 应收敛到在线表
+        # 先让它们不同
+        with torch.no_grad():
+            ema._emb.weight.data.add_(torch.randn_like(ema._emb.weight))
+
+        dist_before = (
+            table._emb.weight.data - ema._emb.weight.data
+        ).norm().item()
+
+        for _ in range(500):
+            with torch.no_grad():
+                for p, p_ema in zip(
+                    table.parameters(), ema.parameters(),
+                ):
+                    p_ema.lerp_(p.data, tau)
+
+        dist_after = (
+            table._emb.weight.data - ema._emb.weight.data
+        ).norm().item()
+
+        assert dist_after < dist_before * 0.1, (
+            f"500 步后 EMA 距离 {dist_after:.6f} 应远小于初始 {dist_before:.6f}"
+        )
+
+    def test_ctx_encoder_targets_ema(self) -> None:
+        """验证 context encoder 对 EMA 目标的 MSE 损失可下降。"""
+        import copy
+        from src.models.context_encoder import ContextEncoder
+        from src.models.task_embedding import TaskEmbeddingTable
+
+        n_tasks = 2
+        table = TaskEmbeddingTable(n_tasks, TASK_DIM)
+        ema = copy.deepcopy(table)
+        for p in ema.parameters():
+            p.requires_grad_(False)
+
+        enc = ContextEncoder(OBS_DIM, ACT_DIM, TASK_DIM, device=DEVICE)
+        optimizer = torch.optim.Adam(enc.parameters(), lr=1e-3)
+
+        losses = []
+        for _ in range(30):
+            task_ids = torch.randint(0, n_tasks, (BATCH,))
+            with torch.no_grad():
+                z_target = ema(task_ids)
+
+            obs = torch.randn(BATCH, 16, OBS_DIM)
+            actions = torch.randn(BATCH, 16, ACT_DIM)
+            rewards = torch.randn(BATCH, 16, 1)
+            next_obs = torch.randn(BATCH, 16, OBS_DIM)
+
+            z_ctx = enc.encode_transitions(obs, actions, rewards, next_obs)
+            loss = F.mse_loss(z_ctx, z_target)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            losses.append(loss.item())
+
+        assert losses[-1] < losses[0], (
+            f"对 EMA 目标的损失未下降: {losses[0]:.4f} -> {losses[-1]:.4f}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

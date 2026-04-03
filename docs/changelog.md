@@ -15,6 +15,11 @@
 
 <!-- 新记录插入到此行下方，最新的在最上面 -->
 
+### 20260403-220000
+- **类型**: fix
+- **涉及文件**: `src/runner/trainer.py`, `scripts/evaluate_fewshot.py`, `tests/test_context_encoder.py`
+- **摘要**: 修复上下文编码器的 moving target 问题。为任务嵌入表添加 EMA 副本作为上下文编码器的稳定训练目标（类似 Critic 的 target network），防止因在线嵌入不断变化导致 ctx_loss 无法收敛。评估脚本加载 EMA 嵌入用于余弦相似度比较。新增 3 个 EMA 相关测试，总计 75 个测试通过。
+
 ### 20260404-030000
 - **类型**: feat
 - **涉及文件**: `scripts/evaluate_fewshot.py`（新建）, `src/config/tasks.py`, `tests/test_evaluate_fewshot.py`（新建）
