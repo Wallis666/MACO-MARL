@@ -285,15 +285,21 @@ class ReplayBuffer:
         # 随机为每个样本分配任务
         sample_tasks = np.random.choice(unique_tasks, size=batch_size)
 
-        # 为每个样本从对应任务池中采样 n_context 条
-        ctx_indices = np.zeros(
+        # 向量化：按任务分组批量采样，避免 Python for 循环
+        ctx_indices = np.empty(
             (batch_size, n_context), dtype=np.int64,
         )
-        for i in range(batch_size):
-            pool = task_pool[int(sample_tasks[i])]
-            ctx_indices[i] = np.random.choice(
-                pool, size=n_context, replace=len(pool) < n_context,
+        for tid in unique_tasks:
+            mask = sample_tasks == tid
+            count = mask.sum()
+            if count == 0:
+                continue
+            pool = task_pool[int(tid)]
+            # 一次性生成该任务所有样本的随机索引
+            rand_idx = np.random.randint(
+                0, len(pool), size=(int(count), n_context),
             )
+            ctx_indices[mask] = pool[rand_idx]
 
         # 收集数据
         ctx_obs = [
