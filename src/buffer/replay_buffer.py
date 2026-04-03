@@ -76,6 +76,9 @@ class ReplayBuffer:
 
         self.idx = 0
         self.cur_size = 0
+        self._task_pool: dict[int, np.ndarray] = {}
+        self._task_pool_dirty = True
+        self._inserts_since_rebuild = 0
 
         self.gamma_buffer = np.zeros(n_step + 1, dtype=np.float32)
         self.gamma_buffer[0] = 1.0
@@ -128,6 +131,10 @@ class ReplayBuffer:
 
         self.idx = (self.idx + length) % self.buffer_size
         self.cur_size = min(self.cur_size + length, self.buffer_size)
+        self._inserts_since_rebuild += 1
+        if self._inserts_since_rebuild >= 1000:
+            self._task_pool_dirty = True
+            self._inserts_since_rebuild = 0
         self._update_end_flag()
 
     def _update_end_flag(self) -> None:
@@ -262,14 +269,18 @@ class ReplayBuffer:
         if batch_size is None:
             batch_size = self.batch_size
 
-        # 构建 per-task 索引映射
-        valid_idx = np.arange(self.cur_size)
-        task_ids_all = self.task_idx[:self.cur_size]
-        unique_tasks = np.unique(task_ids_all)
-        task_pool = {
-            int(tid): valid_idx[task_ids_all == tid]
-            for tid in unique_tasks
-        }
+        # 缓存 per-task 索引映射，每 1000 次 insert 或首次调用时重建
+        # （新插入的少量数据不影响采样分布，无需每步重建）
+        if self._task_pool_dirty or not self._task_pool:
+            valid_idx = np.arange(self.cur_size)
+            task_ids_all = self.task_idx[:self.cur_size]
+            self._task_pool = {
+                int(tid): valid_idx[task_ids_all == tid]
+                for tid in np.unique(task_ids_all)
+            }
+            self._task_pool_dirty = False
+        task_pool = self._task_pool
+        unique_tasks = np.array(list(task_pool.keys()))
 
         # 随机为每个样本分配任务
         sample_tasks = np.random.choice(unique_tasks, size=batch_size)
