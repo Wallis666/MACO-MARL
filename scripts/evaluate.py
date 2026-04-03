@@ -6,6 +6,12 @@
         --config src/config/default.json \
         --episodes 3 \
         --output runs/phase0/eval_50000.mp4
+
+    # 多任务配置下评估指定任务:
+    conda run -n maco python scripts/evaluate.py \
+        --checkpoint runs/phase0/checkpoints/step_60000.pt \
+        --config src/config/multitask.json \
+        --task cheetah_run_backwards
 """
 import argparse
 import json
@@ -19,19 +25,87 @@ sys.path.insert(0, ".")
 from gymnasium_robotics import mamujoco_v1
 
 from src.algorithms.actor import GaussianPolicy
+from src.config.tasks import TASK_REGISTRY
 from src.models.encoder import MLPEncoder
+
+
+def _resolve_env_config(
+    config: dict,
+    task_name: str | None,
+) -> dict:
+    """从配置中解析出环境参数（scenario、agent_conf、episode_limit）。
+
+    支持单任务配置（env 中直接含 scenario/agent_conf）和多任务配置
+    （env.mode == "multitask"，需通过 --task 指定）。
+
+    :param config: 完整配置字典
+    :param task_name: 指定的任务名（多任务时必填）
+    :return: 包含 scenario、agent_conf、episode_limit 的字典
+    """
+    env_cfg = config["env"]
+
+    if env_cfg.get("mode") == "multitask":
+        task_list = env_cfg.get("tasks", [])
+        if task_name is None:
+            available = ", ".join(task_list)
+            raise ValueError(
+                f"多任务配置需要 --task 参数，可用任务：{available}",
+            )
+        if task_name not in TASK_REGISTRY:
+            available = ", ".join(sorted(TASK_REGISTRY.keys()))
+            raise ValueError(
+                f"未知任务 {task_name!r}，可用任务：{available}",
+            )
+        if task_name not in task_list:
+            raise ValueError(
+                f"任务 {task_name!r} 不在配置的 tasks 列表中: {task_list}",
+            )
+        task_def = TASK_REGISTRY[task_name]
+        task_idx = task_list.index(task_name)
+        return {
+            "scenario": task_def.scenario,
+            "agent_conf": task_def.agent_conf,
+            "episode_limit": env_cfg.get("episode_limit", 1000),
+            "n_tasks": len(task_list),
+            "task_idx": task_idx,
+        }
+
+    if task_name is not None:
+        if task_name not in TASK_REGISTRY:
+            available = ", ".join(sorted(TASK_REGISTRY.keys()))
+            raise ValueError(
+                f"未知任务 {task_name!r}，可用任务：{available}",
+            )
+        task_def = TASK_REGISTRY[task_name]
+        return {
+            "scenario": task_def.scenario,
+            "agent_conf": task_def.agent_conf,
+            "episode_limit": env_cfg.get("episode_limit", 1000),
+            "n_tasks": 0,
+            "task_idx": -1,
+        }
+
+    return {
+        "scenario": env_cfg["scenario"],
+        "agent_conf": env_cfg["agent_conf"],
+        "episode_limit": env_cfg.get("episode_limit", 1000),
+        "n_tasks": 0,
+        "task_idx": -1,
+    }
 
 
 def load_models(
     checkpoint_path: str,
     config: dict,
     device: str,
+    resolved_env: dict | None = None,
 ) -> tuple[list[MLPEncoder], list[GaussianPolicy]]:
     """加载编码器和策略网络。
 
     :param checkpoint_path: 检查点路径
     :param config: 配置字典
     :param device: 设备
+    :param resolved_env: 已解析的环境参数（scenario、agent_conf、episode_limit）
     :return: (encoders, policies)
     """
     ckpt = torch.load(checkpoint_path, map_location=device)
@@ -39,7 +113,7 @@ def load_models(
 
     wm_cfg = config["world_model"]
     actor_cfg = config["actor"]
-    env_cfg = config["env"]
+    env_cfg = resolved_env or config["env"]
 
     env_tmp = mamujoco_v1.parallel_env(
         scenario=env_cfg["scenario"],
@@ -49,9 +123,12 @@ def load_models(
     env_tmp.reset()
     agents = env_tmp.possible_agents
     n_agents = len(agents)
-    obs_dims = [env_tmp.observation_space(a).shape[0] for a in agents]
+    raw_obs_dims = [env_tmp.observation_space(a).shape[0] for a in agents]
     act_dims = [env_tmp.action_space(a).shape[0] for a in agents]
     env_tmp.close()
+
+    n_tasks = env_cfg.get("n_tasks", 0)
+    obs_dims = [d + n_tasks for d in raw_obs_dims] if n_tasks > 0 else raw_obs_dims
 
     encoders = []
     for i in range(n_agents):
@@ -91,6 +168,7 @@ def evaluate(
     device: str,
     output_path: str | None,
     stochastic: bool,
+    resolved_env: dict | None = None,
 ) -> None:
     """运行评估并保存视频。
 
@@ -101,8 +179,9 @@ def evaluate(
     :param device: 设备
     :param output_path: 视频输出路径
     :param stochastic: 是否使用随机策略
+    :param resolved_env: 已解析的环境参数
     """
-    env_cfg = config["env"]
+    env_cfg = resolved_env or config["env"]
 
     render_mode = "rgb_array" if output_path else "human"
     env = mamujoco_v1.parallel_env(
@@ -111,6 +190,15 @@ def evaluate(
         max_episode_steps=env_cfg["episode_limit"],
         render_mode=render_mode,
     )
+
+    # 多任务 one-hot 编码
+    n_tasks = env_cfg.get("n_tasks", 0)
+    task_idx = env_cfg.get("task_idx", -1)
+    if n_tasks > 0:
+        task_onehot = np.zeros(n_tasks, dtype=np.float32)
+        task_onehot[task_idx] = 1.0
+    else:
+        task_onehot = None
 
     frames = []
     all_returns = []
@@ -130,8 +218,11 @@ def evaluate(
 
             actions = {}
             for i, agent in enumerate(agents):
+                obs = raw_obs[agent]
+                if task_onehot is not None:
+                    obs = np.concatenate([task_onehot, obs])
                 obs_t = torch.tensor(
-                    raw_obs[agent],
+                    obs,
                     dtype=torch.float32,
                     device=device,
                 ).unsqueeze(0)
@@ -234,13 +325,22 @@ def main() -> None:
         "--device", type=str, default="cpu",
         help="设备",
     )
+    parser.add_argument(
+        "--task", type=str, default=None,
+        help="指定评估的任务名（多任务配置时必填，如 cheetah_run_backwards）",
+    )
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
         config = json.load(f)
 
+    resolved_env = _resolve_env_config(config, args.task)
+    if args.task:
+        print(f"评估任务: {args.task}")
+
     encoders, policies = load_models(
         args.checkpoint, config, args.device,
+        resolved_env=resolved_env,
     )
 
     evaluate(
@@ -251,6 +351,7 @@ def main() -> None:
         device=args.device,
         output_path=args.output,
         stochastic=not args.deterministic,
+        resolved_env=resolved_env,
     )
 
 

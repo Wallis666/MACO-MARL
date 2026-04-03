@@ -15,6 +15,11 @@
 
 <!-- 新记录插入到此行下方，最新的在最上面 -->
 
+### 20260403-120000
+- **类型**: feat
+- **涉及文件**: `scripts/evaluate.py`
+- **摘要**: 评估脚本添加 `--task` 参数支持多任务配置。新增 `_resolve_env_config` 函数从多任务配置和 TASK_REGISTRY 解析环境参数（含 task_idx/n_tasks）。推理时自动拼接 one-hot 任务编码到观测，确保与多任务训练时的 obs_dim 一致。单任务配置向后兼容。
+
 ### 20260403-010000
 - **类型**: feat
 - **涉及文件**: `src/config/tasks.py`(新建), `src/envs/mamujoco.py`, `src/runner/trainer.py`, `src/config/multitask.json`(新建), `tests/test_multitask.py`(新建)
