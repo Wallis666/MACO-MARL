@@ -52,12 +52,21 @@ def collect_demos(
     task_name: str,
     n_context: int,
     seed: int = 0,
+    models: dict | None = None,
+    task_emb_for_demo: torch.Tensor | None = None,
+    device: str = "cpu",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """用随机策略收集 demo transitions。
+    """收集 demo transitions。
+
+    当提供 models 和 task_emb_for_demo 时使用训练好的策略收集
+    （模拟专家演示），否则使用随机策略。
 
     :param task_name: 任务名（须在 TASK_REGISTRY 中注册）
     :param n_context: 收集的 transition 数量 K
     :param seed: 随机种子
+    :param models: 加载的模型字典（trained 模式需要）
+    :param task_emb_for_demo: demo 收集时使用的任务嵌入
+    :param device: 设备
     :return: (obs, actions, rewards, next_obs)，各形状 (1, K, dim)
     """
     task_def = TASK_REGISTRY[task_name]
@@ -69,16 +78,43 @@ def collect_demos(
         reward_fn=task_def.reward_fn,
     )
 
+    use_trained = (
+        models is not None and task_emb_for_demo is not None
+    )
+
     obs_list, actions_list, rewards_list, next_obs_list = [], [], [], []
     obs_raw, _ = env.reset()
 
     collected = 0
     while collected < n_context:
-        # 随机动���
-        action = np.stack(
-            [env.act_spaces[i].sample() for i in range(env.n_agents)],
-            axis=0,
-        )
+        if use_trained:
+            # 用训练好的策略生成动作
+            action_parts = []
+            for i in range(env.n_agents):
+                obs_t = torch.as_tensor(
+                    obs_raw[i],
+                    dtype=torch.float32,
+                    device=device,
+                ).unsqueeze(0)
+                with torch.no_grad():
+                    z_i = models["encoders"][i].encode(
+                        obs_t, task_emb_for_demo,
+                    )
+                    a_i, _ = models["policies"][i](
+                        z_i, task_emb_for_demo, stochastic=True,
+                    )
+                action_parts.append(
+                    a_i.squeeze(0).cpu().numpy(),
+                )
+            action = np.stack(action_parts, axis=0)
+        else:
+            # 随机动作
+            action = np.stack(
+                [env.act_spaces[i].sample()
+                 for i in range(env.n_agents)],
+                axis=0,
+            )
+
         next_obs_raw, _, rewards, term, trunc, _ = env.step(action)
 
         # 记录 agent 0 的 transition
@@ -491,6 +527,16 @@ def main() -> None:
     parser.add_argument(
         "--seed", type=int, default=0,
     )
+    parser.add_argument(
+        "--demo_policy", type=str, default="random",
+        choices=["random", "trained"],
+        help="demo 收集策略：random（随机）或 trained（用训练策略）",
+    )
+    parser.add_argument(
+        "--demo_task", type=str, default=None,
+        help="trained 模式下用哪个训练任务的嵌入收集 demo"
+             "（默认用第一个训练任务）",
+    )
     args = parser.parse_args()
 
     # 验证任务存在
@@ -575,9 +621,35 @@ def main() -> None:
         if models["context_encoder"] is None:
             raise ValueError("检查点中没有 context_encoder")
 
+        # 确定 demo 收集方式
+        demo_models = None
+        demo_task_emb = None
+        if args.demo_policy == "trained":
+            task_list = config["env"].get("tasks", [])
+            demo_task = args.demo_task or task_list[0]
+            if demo_task not in task_list:
+                raise ValueError(
+                    f"demo_task {demo_task!r} 不在训练列表中",
+                )
+            demo_idx = task_list.index(demo_task)
+            with torch.no_grad():
+                demo_task_emb = models["task_embedding"](
+                    torch.tensor(
+                        [demo_idx], device=args.device,
+                    ),
+                )
+            demo_models = models
+            print(
+                f"使用训练策略收集 demo "
+                f"(嵌入来自 {demo_task}, idx={demo_idx})",
+            )
+
         print(f"收集 {args.n_context} 条 demo transitions...")
         obs, actions, rewards, next_obs = collect_demos(
             args.task, args.n_context, seed=args.seed,
+            models=demo_models,
+            task_emb_for_demo=demo_task_emb,
+            device=args.device,
         )
         print(
             f"  Demo 奖励统计: "
