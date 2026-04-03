@@ -15,6 +15,11 @@
 
 <!-- 新记录插入到此行下方，最新的在最上面 -->
 
+### 20260403-230000
+- **类型**: fix
+- **涉及文件**: `scripts/evaluate.py`
+- **摘要**: 修复评估脚本兼容阶段 2 任务条件化架构。去掉 one-hot 观测拼接逻辑，改为从检查点加载 `TaskEmbeddingTable`，通过 `task_emb` 参数传递给 Encoder 和 Actor。`load_models` 新增 `task_dim` 感知，正确构造 `MLPEncoder(task_dim=32)`。
+
 ### 20260403-220000
 - **类型**: feat
 - **涉及文件**: `src/models/task_embedding.py`（新建）, `src/models/encoder.py`, `src/models/dynamics.py`, `src/models/reward.py`, `src/algorithms/actor.py`, `src/algorithms/critic.py`, `src/algorithms/planner.py`, `src/buffer/replay_buffer.py`, `src/envs/mamujoco.py`, `src/runner/trainer.py`, `src/config/multitask.json`, `tests/test_shapes.py`, `tests/test_multitask.py`

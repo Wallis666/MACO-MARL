@@ -1,3 +1,6 @@
+import os
+os.environ.setdefault("MUJOCO_GL", "egl")
+
 """评估脚本：加载检查点并渲染 episode 视频。
 
 用法:
@@ -27,6 +30,7 @@ from gymnasium_robotics import mamujoco_v1
 from src.algorithms.actor import GaussianPolicy
 from src.config.tasks import TASK_REGISTRY
 from src.models.encoder import MLPEncoder
+from src.models.task_embedding import TaskEmbeddingTable
 
 
 def _resolve_env_config(
@@ -99,14 +103,14 @@ def load_models(
     config: dict,
     device: str,
     resolved_env: dict | None = None,
-) -> tuple[list[MLPEncoder], list[GaussianPolicy]]:
-    """加载编码器和策略网络。
+) -> tuple[list[MLPEncoder], list[GaussianPolicy], TaskEmbeddingTable | None]:
+    """加载编码器、策略网络和任务嵌入表。
 
     :param checkpoint_path: 检查点路径
     :param config: 配置字典
     :param device: 设备
-    :param resolved_env: 已解析的环境参数（scenario、agent_conf、episode_limit）
-    :return: (encoders, policies)
+    :param resolved_env: 已解析的环境参数
+    :return: (encoders, policies, task_embedding)
     """
     ckpt = torch.load(checkpoint_path, map_location=device)
     print(f"加载检查点: step={ckpt['step']}")
@@ -123,18 +127,30 @@ def load_models(
     env_tmp.reset()
     agents = env_tmp.possible_agents
     n_agents = len(agents)
-    raw_obs_dims = [env_tmp.observation_space(a).shape[0] for a in agents]
+    obs_dims = [env_tmp.observation_space(a).shape[0] for a in agents]
     act_dims = [env_tmp.action_space(a).shape[0] for a in agents]
     env_tmp.close()
 
+    task_dim = wm_cfg.get("task_dim", 0)
     n_tasks = env_cfg.get("n_tasks", 0)
-    obs_dims = [d + n_tasks for d in raw_obs_dims] if n_tasks > 0 else raw_obs_dims
+
+    # 加载任务嵌入表（阶段 2+）
+    task_embedding = None
+    if task_dim > 0 and n_tasks > 0 and "task_embedding" in ckpt:
+        task_embedding = TaskEmbeddingTable(
+            n_tasks=n_tasks,
+            task_dim=task_dim,
+        ).to(device)
+        task_embedding.load_state_dict(ckpt["task_embedding"])
+        task_embedding.eval()
+        print(f"任务嵌入: n_tasks={n_tasks}, task_dim={task_dim}")
 
     encoders = []
     for i in range(n_agents):
         enc = MLPEncoder(
             obs_dim=obs_dims[i],
             latent_dim=wm_cfg["latent_dim"],
+            task_dim=task_dim,
             hidden_dims=wm_cfg["hidden_dims"],
             simnorm_dim=wm_cfg["simnorm_dim"],
             device=device,
@@ -148,6 +164,7 @@ def load_models(
         policy = GaussianPolicy(
             latent_dim=wm_cfg["latent_dim"],
             action_dim=act_dims[i],
+            task_dim=task_dim,
             hidden_sizes=actor_cfg["hidden_sizes"],
             log_std_min=actor_cfg["log_std_min"],
             log_std_max=actor_cfg["log_std_max"],
@@ -157,13 +174,14 @@ def load_models(
         policy.eval()
         policies.append(policy)
 
-    return encoders, policies
+    return encoders, policies, task_embedding
 
 
 def evaluate(
     config: dict,
     encoders: list[MLPEncoder],
     policies: list[GaussianPolicy],
+    task_embedding: TaskEmbeddingTable | None,
     num_episodes: int,
     device: str,
     output_path: str | None,
@@ -175,6 +193,7 @@ def evaluate(
     :param config: 配置字典
     :param encoders: 编码器列表
     :param policies: 策略网络列表
+    :param task_embedding: 任务嵌入表（多任务时非 None）
     :param num_episodes: 评估 episode 数
     :param device: 设备
     :param output_path: 视频输出路径
@@ -191,14 +210,13 @@ def evaluate(
         render_mode=render_mode,
     )
 
-    # 多任务 one-hot 编码
-    n_tasks = env_cfg.get("n_tasks", 0)
+    # 获取任务嵌入（阶段 2+）
+    task_emb = None
     task_idx = env_cfg.get("task_idx", -1)
-    if n_tasks > 0:
-        task_onehot = np.zeros(n_tasks, dtype=np.float32)
-        task_onehot[task_idx] = 1.0
-    else:
-        task_onehot = None
+    if task_embedding is not None and task_idx >= 0:
+        with torch.no_grad():
+            task_id = torch.tensor([task_idx], device=device)
+            task_emb = task_embedding(task_id)  # (1, task_dim)
 
     frames = []
     all_returns = []
@@ -218,17 +236,16 @@ def evaluate(
 
             actions = {}
             for i, agent in enumerate(agents):
-                obs = raw_obs[agent]
-                if task_onehot is not None:
-                    obs = np.concatenate([task_onehot, obs])
                 obs_t = torch.tensor(
-                    obs,
+                    raw_obs[agent],
                     dtype=torch.float32,
                     device=device,
                 ).unsqueeze(0)
                 with torch.no_grad():
-                    z = encoders[i].encode(obs_t)
-                    action, _ = policies[i](z, stochastic=stochastic)
+                    z = encoders[i].encode(obs_t, task_emb)
+                    action, _ = policies[i](
+                        z, task_emb, stochastic=stochastic,
+                    )
                 actions[agent] = action.squeeze(0).cpu().numpy()
 
             raw_obs, raw_rewards, raw_terms, raw_truncs, raw_infos = (
@@ -338,7 +355,7 @@ def main() -> None:
     if args.task:
         print(f"评估任务: {args.task}")
 
-    encoders, policies = load_models(
+    encoders, policies, task_embedding = load_models(
         args.checkpoint, config, args.device,
         resolved_env=resolved_env,
     )
@@ -347,6 +364,7 @@ def main() -> None:
         config=config,
         encoders=encoders,
         policies=policies,
+        task_embedding=task_embedding,
         num_episodes=args.episodes,
         device=args.device,
         output_path=args.output,
