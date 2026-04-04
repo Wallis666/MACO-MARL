@@ -530,9 +530,7 @@ class Trainer:
         :return: 形状 (n_threads, n_agents, act_dim) 的 numpy 数组
         """
         agent_actions = torch.stack(actions, dim=1)
-        if agent_actions.is_cuda:
-            return agent_actions.cpu(non_blocking=True).numpy()
-        return agent_actions.numpy()
+        return agent_actions.detach().cpu().numpy()
 
     def _plan(
         self,
