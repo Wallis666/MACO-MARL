@@ -120,8 +120,9 @@ class MPPIPlanner:
                 zs, dynamics_model, actors, task_emb,
             )
 
+        n_rand = self.num_samples - self.num_pi_trajs
         actions = [
-            torch.zeros(
+            torch.empty(
                 self.horizon,
                 n_threads,
                 self.num_samples,
@@ -131,6 +132,11 @@ class MPPIPlanner:
             for i in range(self.n_agents)
         ]
 
+        # 预填充策略轨迹部分（每次迭代不变）
+        if pi_actions is not None:
+            for i in range(self.n_agents):
+                actions[i][:, :, :self.num_pi_trajs] = pi_actions[i]
+
         out_actions = [
             torch.zeros(n_threads, self.act_dims[i], device=self.device)
             for i in range(self.n_agents)
@@ -138,8 +144,7 @@ class MPPIPlanner:
 
         for iteration in range(self.iterations):
             for i in range(self.n_agents):
-                n_rand = self.num_samples - self.num_pi_trajs
-                rand_actions = (
+                actions[i][:, :, self.num_pi_trajs:] = (
                     act_mean[i].unsqueeze(2)
                     + act_std[i].unsqueeze(2)
                     * torch.randn(
@@ -150,13 +155,6 @@ class MPPIPlanner:
                         device=self.device,
                     )
                 ).clamp(-1, 1)
-
-                if pi_actions is not None:
-                    actions[i] = torch.cat(
-                        [pi_actions[i], rand_actions], dim=2,
-                    )
-                else:
-                    actions[i] = rand_actions
 
             g_returns = self._estimate_value(
                 zs, actions, dynamics_model, reward_model,

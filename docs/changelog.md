@@ -15,6 +15,11 @@
 
 <!-- 新记录插入到此行下方，最新的在最上面 -->
 
+### 20260404-120000
+- **类型**: refactor
+- **涉及文件**: `src/runner/trainer.py`, `src/algorithms/planner.py`
+- **摘要**: 纯工程性能优化（不改变算法逻辑和数值结果）。(1) `_actions_to_numpy` 使用非阻塞 GPU→CPU 传输；(2) `run()` 和 `_warmup()` 中 episode 结束追踪改用 numpy 掩码向量化；(3) warmup 随机动作生成改用 `np.random.uniform` 批量采样替代嵌套列表推导；(4) MPPI 规划器预分配 actions 张量并用切片赋值替代 `torch.cat`；(5) 新增 `train.compile` 配置开关支持 `torch.compile` 加速（默认关闭）。75 个测试通过。
+
 ### 20260403-230000
 - **类型**: fix
 - **涉及文件**: `src/runner/trainer.py`, `scripts/evaluate_fewshot.py`, `src/config/multitask.json`

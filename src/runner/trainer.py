@@ -217,6 +217,26 @@ class Trainer:
             device=self.device,
         )
 
+        # 可选 torch.compile 加速（PyTorch 2.0+）
+        if self.config["train"].get("compile", False):
+            compile_mode = self.config["train"].get(
+                "compile_mode", "reduce-overhead",
+            )
+            print(f"  torch.compile 模式: {compile_mode}")
+            self.dynamics = torch.compile(
+                self.dynamics, mode=compile_mode,
+            )
+            self.reward_model = torch.compile(
+                self.reward_model, mode=compile_mode,
+            )
+            for i in range(self.n_agents):
+                self.encoders[i] = torch.compile(
+                    self.encoders[i], mode=compile_mode,
+                )
+                self.actors[i].policy = torch.compile(
+                    self.actors[i].policy, mode=compile_mode,
+                )
+
     def _init_buffer(self) -> None:
         """初始化经验回放。"""
         algo_cfg = self.config["algo"]
@@ -363,16 +383,19 @@ class Trainer:
             )
 
             episode_rewards += rewards
-            for i in range(self.n_threads):
-                if dones[i]:
-                    ep_ret = float(episode_rewards[i])
-                    recent_returns.append(ep_ret)
-                    per_task_returns[self.task_idxes[i]].append(ep_ret)
-                    total_episodes += 1
-                    episode_rewards[i] = 0.0
-                    t0[i] = True
-                else:
-                    t0[i] = False
+            done_mask = dones.astype(bool)
+            if done_mask.any():
+                done_returns = episode_rewards[done_mask]
+                recent_returns.extend(done_returns.tolist())
+                done_tasks = self.task_idxes[done_mask]
+                for tid in np.unique(done_tasks):
+                    task_mask = done_tasks == tid
+                    per_task_returns[tid].extend(
+                        done_returns[task_mask].tolist(),
+                    )
+                total_episodes += int(done_mask.sum())
+                episode_rewards[done_mask] = 0.0
+            t0 = done_mask.tolist()
 
             obs_list = next_obs_list
             share_obs = next_share_obs
@@ -447,20 +470,20 @@ class Trainer:
         train_cfg = self.config["train"]
         warmup_steps = train_cfg["warmup_steps"] // self.n_threads
 
+        # 预计算动作空间边界用于向量化随机采样
+        act_lows = np.stack(
+            [self.envs.act_spaces[i].low for i in range(self.n_agents)],
+        )  # (n_agents, act_dim)
+        act_highs = np.stack(
+            [self.envs.act_spaces[i].high for i in range(self.n_agents)],
+        )  # (n_agents, act_dim)
+
         for _ in range(warmup_steps):
-            actions_np = np.stack(
-                [
-                    np.stack(
-                        [
-                            self.envs.act_spaces[i].sample()
-                            for i in range(self.n_agents)
-                        ],
-                        axis=0,
-                    )
-                    for _ in range(self.n_threads)
-                ],
-                axis=0,
-            )
+            actions_np = np.random.uniform(
+                low=act_lows,
+                high=act_highs,
+                size=(self.n_threads, self.n_agents, act_lows.shape[-1]),
+            ).astype(np.float32)
 
             next_obs_list, next_share_obs, rewards, dones, truncs, infos = (
                 self.envs.step(actions_np)
@@ -473,16 +496,19 @@ class Trainer:
             )
 
             episode_rewards += rewards
-            for i in range(self.n_threads):
-                if dones[i]:
-                    ep_ret = float(episode_rewards[i])
-                    recent_returns.append(ep_ret)
-                    if per_task_returns is not None:
-                        per_task_returns[self.task_idxes[i]].append(ep_ret)
-                    episode_rewards[i] = 0.0
-                    t0[i] = True
-                else:
-                    t0[i] = False
+            done_mask = dones.astype(bool)
+            if done_mask.any():
+                done_returns = episode_rewards[done_mask]
+                recent_returns.extend(done_returns.tolist())
+                if per_task_returns is not None:
+                    done_tasks = self.task_idxes[done_mask]
+                    for tid in np.unique(done_tasks):
+                        task_mask = done_tasks == tid
+                        per_task_returns[tid].extend(
+                            done_returns[task_mask].tolist(),
+                        )
+                episode_rewards[done_mask] = 0.0
+            t0 = done_mask.tolist()
 
             obs_list = next_obs_list
             share_obs = next_share_obs
@@ -504,7 +530,9 @@ class Trainer:
         :return: 形状 (n_threads, n_agents, act_dim) 的 numpy 数组
         """
         agent_actions = torch.stack(actions, dim=1)
-        return agent_actions.cpu().numpy()
+        if agent_actions.is_cuda:
+            return agent_actions.cpu(non_blocking=True).numpy()
+        return agent_actions.numpy()
 
     def _plan(
         self,
