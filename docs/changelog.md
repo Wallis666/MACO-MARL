@@ -15,10 +15,15 @@
 
 <!-- 新记录插入到此行下方，最新的在最上面 -->
 
+### 20260403-230000
+- **类型**: fix
+- **涉及文件**: `src/runner/trainer.py`, `scripts/evaluate_fewshot.py`, `src/config/multitask.json`
+- **摘要**: 改用两阶段训练策略修复上下文编码器的 moving target 问题。EMA 方案验证无效（ctx_loss 仍从 0.0005 升至 0.0087），改为延迟启动：前 800K 步只训练世界模型让任务嵌入稳定，后 400K 步再训练上下文编码器（目标已固定）。移除 EMA 相关代码。总步数调整为 1.2M。75 个测试通过。
+
 ### 20260403-220000
 - **类型**: fix
 - **涉及文件**: `src/runner/trainer.py`, `scripts/evaluate_fewshot.py`, `tests/test_context_encoder.py`
-- **摘要**: 修复上下文编码器的 moving target 问题。为任务嵌入表添加 EMA 副本作为上下文编码器的稳定训练目标（类似 Critic 的 target network），防止因在线嵌入不断变化导致 ctx_loss 无法收敛。评估脚本加载 EMA 嵌入用于余弦相似度比较。新增 3 个 EMA 相关测试，总计 75 个测试通过。
+- **摘要**: （已被两阶段方案替代）为任务嵌入表添加 EMA 副本作为上下文编码器的稳定训练目标。实验验证 EMA 平滑不足以解决 moving target 问题。
 
 ### 20260404-030000
 - **类型**: feat

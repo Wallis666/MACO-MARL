@@ -237,18 +237,6 @@ def load_all_models(
     else:
         models["task_embedding"] = None
 
-    # EMA TaskEmbeddingTable（上下文编码器的训练目标）
-    if task_dim > 0 and "ema_task_embedding" in ckpt:
-        ema_table = TaskEmbeddingTable(
-            n_tasks=n_tasks,
-            task_dim=task_dim,
-        ).to(device)
-        ema_table.load_state_dict(ckpt["ema_task_embedding"])
-        ema_table.eval()
-        models["ema_task_embedding"] = ema_table
-    else:
-        models["ema_task_embedding"] = None
-
     # ContextEncoder
     if task_dim > 0 and "context_encoder" in ckpt:
         ctx_cfg = config.get("context_encoder", {})
@@ -679,29 +667,19 @@ def main() -> None:
         print(f"推断嵌入范数: {task_emb.norm().item():.4f}")
 
         # 与训练任务嵌入的余弦相似度
-        # 优先用 EMA 嵌入比较（context encoder 的训练目标）
-        ref_table = (
-            models["ema_task_embedding"] or models["task_embedding"]
-        )
-        if ref_table is not None:
-            ref_label = (
-                "EMA" if models["ema_task_embedding"] is not None
-                else "live"
-            )
+        # 与训练任务嵌入的余弦相似度
+        if models["task_embedding"] is not None:
             with torch.no_grad():
                 for i, tname in enumerate(
                     config["env"].get("tasks", []),
                 ):
-                    train_emb = ref_table(
+                    train_emb = models["task_embedding"](
                         torch.tensor([i], device=args.device),
                     )
                     cos_sim = torch.nn.functional.cosine_similarity(
                         task_emb, train_emb,
                     ).item()
-                    print(
-                        f"  与 {tname} 的余弦相似度 "
-                        f"({ref_label}): {cos_sim:.4f}",
-                    )
+                    print(f"  与 {tname} 的余弦相似度: {cos_sim:.4f}")
 
         use_mppi = args.mode == "few-shot-mppi"
         all_returns = run_episodes(

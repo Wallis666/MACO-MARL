@@ -5,7 +5,6 @@
 多任务模式下通过可学习任务嵌入实现任务条件化，
 上下文编码器学习从演示 transitions 推断任务嵌入。
 """
-import copy
 import json
 import os
 import time
@@ -137,16 +136,6 @@ class Trainer:
             ).to(self.device)
         else:
             self.task_embedding = None
-
-        # EMA 任务嵌入（上下文编码器的稳定目标，仅多任务模式）
-        if self.task_dim > 0:
-            self.ema_task_embedding = copy.deepcopy(
-                self.task_embedding,
-            )
-            for p in self.ema_task_embedding.parameters():
-                p.requires_grad_(False)
-        else:
-            self.ema_task_embedding = None
 
         # 上下文编码器（仅多任务模式）
         if self.task_dim > 0:
@@ -399,18 +388,12 @@ class Trainer:
 
                 self.critic.soft_update()
 
-                # EMA 任务嵌入更新
-                if self.ema_task_embedding is not None:
-                    ema_tau = algo_cfg.get("ema_task_tau", 0.005)
-                    with torch.no_grad():
-                        for p, p_ema in zip(
-                            self.task_embedding.parameters(),
-                            self.ema_task_embedding.parameters(),
-                        ):
-                            p_ema.lerp_(p.data, ema_tau)
-
-                # 上下文编码器训练
-                if self.context_encoder is not None:
+                # 上下文编码器训练（延迟启动，等任务嵌入稳定）
+                ctx_start = algo_cfg.get("ctx_start_step", 0)
+                if (
+                    self.context_encoder is not None
+                    and self.global_step >= ctx_start
+                ):
                     ctx_info = self._context_encoder_train()
                     train_info.update(ctx_info)
 
@@ -922,9 +905,9 @@ class Trainer:
             ctx_obs, ctx_actions, ctx_rewards, ctx_next_obs,
         )
 
-        # 目标：EMA 任务嵌入（缓慢移动的稳定目标）
+        # 目标：任务嵌入表（延迟启动后嵌入已基本稳定）
         with torch.no_grad():
-            z_target = self.ema_task_embedding(task_ids)
+            z_target = self.task_embedding(task_ids)
 
         ctx_loss = F.mse_loss(z_ctx, z_target)
 
@@ -1023,8 +1006,6 @@ class Trainer:
         }
         if self.task_embedding is not None:
             state["task_embedding"] = self.task_embedding.state_dict()
-        if self.ema_task_embedding is not None:
-            state["ema_task_embedding"] = self.ema_task_embedding.state_dict()
         if self.context_encoder is not None:
             state["context_encoder"] = self.context_encoder.state_dict()
             state["ctx_optimizer"] = self.ctx_optimizer.state_dict()

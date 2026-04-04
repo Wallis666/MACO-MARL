@@ -12,7 +12,8 @@
         "lr": 3e-4,
         "enc_lr_scale": 0.3,
         "update_per_train": 4,
-        "train_interval": 2
+        "train_interval": 2,
+        "ctx_start_step": 800000
     },
     "world_model": {
         "latent_dim": 128,
@@ -40,7 +41,7 @@
     },
     "train": {
         "n_rollout_threads": 16,
-        "num_env_steps": 1000000,
+        "num_env_steps": 1200000,
         "warmup_steps": 5000,
         "warmup_train": true,
         "warmup_train_steps": 2500,
